@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 rust-version = "1.88"
-keywords = ["mcp", "model-context-protocol", "rmcp", "cli"]
+keywords = ["mcp", "mcp-server", "rmcp", "embeddings", "cli"]
 categories = ["development-tools"]
 
 [lib]
