@@ -334,5 +334,5 @@ jobs:
             done
             [ "$ok" = true ] || { echo "::error::could not deprecate $retired"; exit 1; }
             for i in $(seq 1 24); do deprecated && break; sleep 5; done
-            deprecated || { echo "::error::$retired deprecation readback failed"; exit 1; }
+            deprecated || { echo "::error::$retired is still not shown as deprecated"; exit 1; }
           done

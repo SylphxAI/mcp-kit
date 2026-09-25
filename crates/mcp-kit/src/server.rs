@@ -4,7 +4,7 @@
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
@@ -50,6 +50,9 @@ struct Handler<A: App> {
 }
 
 impl<A: App> Handler<A> {
+    // MCP roots are deprecated by SEP-2577 but are still how today's clients
+    // (Claude Code, Cursor, VS Code) say which folder is open.
+    #[allow(deprecated)]
     async fn client_roots(&self, peer: &rmcp::Peer<RoleServer>) -> Vec<PathBuf> {
         if let Some(r) = self.roots.lock().unwrap().clone() {
             return r;
@@ -58,7 +61,7 @@ impl<A: App> Handler<A> {
         if !offered {
             return Vec::new();
         }
-        let roots = match tokio::time::timeout(Duration::from_secs(3), peer.list_roots()).await {
+        let roots: Vec<PathBuf> = match tokio::time::timeout(Duration::from_secs(3), peer.list_roots()).await {
             Ok(Ok(res)) => res.roots.iter().filter_map(|r| crate::roots::file_uri_to_path(&r.uri)).collect(),
             _ => return Vec::new(),
         };
@@ -73,9 +76,9 @@ pub fn parse_tools(defs: Vec<Value>) -> Result<Vec<Tool>, serde_json::Error> {
 }
 
 impl<A: App> ServerHandler for Handler<A> {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let i = self.app.info();
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(i.name, i.version).with_title(i.title).with_website_url(i.website))
             .with_instructions(i.instructions)
     }
