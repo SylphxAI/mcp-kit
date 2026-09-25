@@ -1,0 +1,59 @@
+name: publish
+
+# Publishes the crate sylphx-mcp-kit to crates.io when Cargo.toml carries a
+# version that is not there yet, then tags vX.Y.Z and moves v0, which the
+# servers' release workflows use (`SylphxAI/mcp-kit/.github/workflows/release.yml@v0`).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - id: v
+        run: |
+          set -euo pipefail
+          V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="sylphx-mcp-kit") | .version')
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -A "sylphx-mcp-kit-ci (github.com/SylphxAI/mcp-kit)" "https://crates.io/api/v1/crates/sylphx-mcp-kit/$V")
+          if [ "$code" = 200 ]; then echo "publish=false" >> "$GITHUB_OUTPUT"; else echo "publish=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Publish to crates.io
+        if: steps.v.outputs.publish == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo publish --locked -p sylphx-mcp-kit
+          for i in $(seq 1 60); do
+            curl -fsS -A "sylphx-mcp-kit-ci (github.com/SylphxAI/mcp-kit)" "https://crates.io/api/v1/crates/sylphx-mcp-kit/$V" >/dev/null && break
+            sleep 5
+          done
+          curl -fsS -A "sylphx-mcp-kit-ci (github.com/SylphxAI/mcp-kit)" "https://crates.io/api/v1/crates/sylphx-mcp-kit/$V" | jq '{version: .version.num, created: .version.created_at}'
+      - name: Tag the release and move v0
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch -q --tags
+          # Only a new version moves the tags; other merges leave v0 alone.
+          if git rev-parse -q --verify "refs/tags/v$V" >/dev/null; then echo "v$V is tagged"; exit 0; fi
+          git tag "v$V" "$GITHUB_SHA"
+          git tag -f "v${V%%.*}" "$GITHUB_SHA"
+          git push origin "refs/tags/v$V"
+          git push -f origin "refs/tags/v${V%%.*}"

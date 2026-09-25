@@ -23,8 +23,28 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --no-default-features --features embed -- -D warnings
+      - run: cargo test --locked --all-features
+      # The embedding tokenizer and vectors against model2vec itself.
+      - uses: actions/cache@v4
+        with:
+          path: /tmp/m2v
+          key: model2vec-potion-code-16M-v2-${{ hashFiles('crates/mcp-kit/tests/model2vec_expected.py') }}
+      - name: Embeddings match model2vec
+        run: |
+          set -euo pipefail
+          d=/tmp/m2v
+          if [ ! -f $d/expected.json ]; then
+            mkdir -p $d
+            rev=e9d2a44ca6a05ac6685f3b23709ea57eb7352d5b
+            for f in tokenizer.json model.safetensors config.json; do
+              curl -fsSL -o $d/$f "https://huggingface.co/minishlab/potion-code-16M-v2/resolve/$rev/$f"
+            done
+            python3 -m venv /tmp/venv && /tmp/venv/bin/pip -q install model2vec==0.9.0
+            /tmp/venv/bin/python crates/mcp-kit/tests/model2vec_expected.py $d
+          fi
+          SYLPHX_MODEL_TEST_DIR=$d cargo test --locked --features embed matches_model2vec -- --nocapture
       - name: Launcher runs a platform binary and forwards the exit code
         run: |
           set -euo pipefail
@@ -36,6 +56,8 @@ jobs:
           cp npm/launcher.js "$d/pkg/bin/tool.js"
           set +e; out=$(NODE_PATH="$d/node_modules" node "$d/pkg/bin/tool.js" a b); code=$?; set -e
           test "$out" = "tool a b" && test "$code" = 3
+      - name: MCP Bundles build, validate and run
+        run: node --test scripts/mcpb.test.mjs
 
   plain-language:
     if: github.event_name != 'merge_group'
@@ -49,7 +71,9 @@ jobs:
 
   other-os:
     if: github.event_name == 'merge_group'
-    name: test (${{ matrix.os }})
+    # A plain name: GitHub adds the matrix value, and a skipped job does not
+    # show an unexpanded `${{ matrix.os }}`.
+    name: test other OS
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -59,7 +83,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test --locked
+      - run: cargo test --locked --all-features
 
   ci:
     if: always()
