@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: SylphxAI/.github/.github/actions/plain-language@64598b859231c51f32d0be39630f36893d84f204
+      - uses: SylphxAI/.github/.github/actions/plain-language@8eb02f8a9bd9c16c666829c5b1d315406df4dcdf
 
   other-os:
     if: github.event_name == 'merge_group'
