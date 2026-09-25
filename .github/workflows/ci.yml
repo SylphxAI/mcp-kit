@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Launcher runs a platform binary and forwards the exit code
+        run: |
+          set -euo pipefail
+          d=$(mktemp -d)
+          mkdir -p "$d/node_modules/@x/tool-linux-x64-gnu" "$d/pkg/bin"
+          printf '#!/bin/sh\necho "tool $*"\nexit 3\n' > "$d/node_modules/@x/tool-linux-x64-gnu/tool"
+          chmod +x "$d/node_modules/@x/tool-linux-x64-gnu/tool"
+          echo '{"name":"@x/tool","bin":{"tool":"bin/tool.js"}}' > "$d/pkg/package.json"
+          cp npm/launcher.js "$d/pkg/bin/tool.js"
+          set +e; out=$(NODE_PATH="$d/node_modules" node "$d/pkg/bin/tool.js" a b); code=$?; set -e
+          test "$out" = "tool a b" && test "$code" = 3
+
+  plain-language:
+    if: github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: SylphxAI/.github/.github/actions/plain-language@64598b859231c51f32d0be39630f36893d84f204
+
+  other-os:
+    if: github.event_name == 'merge_group'
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  ci:
+    if: always()
+    needs: [test, plain-language, other-os]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do case "$r" in success|skipped) ;; *) exit 1 ;; esac; done

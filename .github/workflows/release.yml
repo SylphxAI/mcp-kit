@@ -1,0 +1,338 @@
+name: release (reusable)
+
+# Publishes an MCP server built with mcp-kit when its npm version is new:
+# native binaries (5 targets) -> npm (trusted publishing, OIDC) -> npx smoke
+# -> GitHub release -> MCP Registry, plus optional GHCR image and retiring
+# old registry names. No long-lived tokens.
+#
+# Caller (e.g. .github/workflows/release.yml):
+#   on: { push: { branches: [main] }, workflow_dispatch: {} }
+#   jobs:
+#     release:
+#       uses: SylphxAI/mcp-kit/.github/workflows/release.yml@v0
+#       permissions: { contents: write, id-token: write, packages: write }
+#       with: { name: repomap, npm-package: '@sylphx/repomap', mcp-name: io.github.SylphxAI/repomap }
+#
+# npm trusted publishing matches the CALLER's workflow file, so each npm
+# package trusts <owner>/<repo> + .github/workflows/release.yml.
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: 'Binary name (also the cargo package unless cargo-package is set).'
+        type: string
+        required: true
+      npm-package:
+        description: 'Main npm package, e.g. @sylphx/repomap.'
+        type: string
+        required: true
+      mcp-name:
+        description: 'MCP Registry name, e.g. io.github.SylphxAI/repomap (server.json at the repo root).'
+        type: string
+        required: true
+      cargo-package:
+        type: string
+        default: ''
+      package-dir:
+        description: 'Directory of the main npm package. Default packages/<name>.'
+        type: string
+        default: ''
+      natives-dir:
+        description: 'Directory holding one npm package per platform (darwin-arm64, …).'
+        type: string
+        default: packages/npm
+      alias-dirs:
+        description: 'Space-separated npm alias package directories published after the main package.'
+        type: string
+        default: ''
+      smoke:
+        description: 'Shell run after publishing, with $V set; default `npx -y <npm-package>@$V version`.'
+        type: string
+        default: ''
+      docker-image:
+        description: 'Optional GHCR image (e.g. ghcr.io/sylphxai/repomap), built from Dockerfile.release.'
+        type: string
+        default: ''
+      retired-mcp-names:
+        description: 'Space-separated MCP Registry names to mark deprecated.'
+        type: string
+        default: ''
+      retired-message:
+        type: string
+        default: ''
+      major-tag:
+        description: 'Move the vN tag to each release (for `uses: owner/repo@vN` actions).'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+      cargo: ${{ steps.v.outputs.cargo }}
+      dir: ${{ steps.v.outputs.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          NAME: ${{ inputs.name }}
+          PKG: ${{ inputs.npm-package }}
+          DIR: ${{ inputs.package-dir }}
+          CARGO: ${{ inputs.cargo-package }}
+          NATIVES: ${{ inputs.natives-dir }}
+          ALIASES: ${{ inputs.alias-dirs }}
+        run: |
+          set -euo pipefail
+          DIR=${DIR:-packages/$NAME}
+          V=$(node -p "require('./$DIR/package.json').version")
+          # Every manifest carries the same version.
+          node -e '
+            const fs = require("fs"), [v, natives, ...aliases] = process.argv.slice(1);
+            const bad = [];
+            const eq = (what, got) => got !== v && bad.push(`${what}: ${got}`);
+            for (const d of fs.readdirSync(natives)) eq(`${natives}/${d}`, require(`./${natives}/${d}/package.json`).version);
+            for (const d of aliases.filter(Boolean)) eq(d, require(`./${d}/package.json`).version);
+            if (fs.existsSync("server.json")) { const s = require("./server.json"); eq("server.json", s.version); eq("server.json package", s.packages[0].version); }
+            if (bad.length) { console.error(`version mismatch (want ${v}):\n  ${bad.join("\n  ")}`); process.exit(1); }
+          ' "$V" "$NATIVES" $ALIASES
+          {
+            echo "version=$V"
+            echo "dir=$DIR"
+            echo "cargo=${CARGO:-$NAME}"
+            if npm view "$PKG@$V" version >/dev/null 2>&1; then echo "publish=false"; else echo "publish=true"; fi
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    name: build ${{ matrix.key }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { key: darwin-arm64, os: macos-latest, target: aarch64-apple-darwin }
+          - { key: darwin-x64, os: macos-latest, target: x86_64-apple-darwin }
+          - { key: linux-x64-gnu, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, zig: '2.17' }
+          - { key: linux-arm64-gnu, os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: '2.17' }
+          - { key: win32-x64-msvc, os: windows-latest, target: x86_64-pc-windows-msvc, exe: '.exe' }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - if: matrix.zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - if: matrix.zig
+        run: cargo install cargo-zigbuild --version 0.23.0 --locked
+      - name: Build
+        shell: bash
+        env:
+          CARGO_PKG: ${{ needs.check.outputs.cargo }}
+          BIN: ${{ inputs.name }}${{ matrix.exe }}
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.zig }}" ]; then
+            cargo zigbuild --release --locked -p "$CARGO_PKG" --target ${{ matrix.target }}.${{ matrix.zig }}
+          else
+            cargo build --release --locked -p "$CARGO_PKG" --target ${{ matrix.target }}
+          fi
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/$BIN" out/
+      - name: Run it (native targets)
+        if: matrix.key != 'linux-arm64-gnu' && matrix.key != 'darwin-x64'
+        shell: bash
+        run: ./out/${{ inputs.name }}${{ matrix.exe }} version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.key }}
+          path: out/${{ inputs.name }}${{ matrix.exe }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      V: ${{ needs.check.outputs.version }}
+      NAME: ${{ inputs.name }}
+      PKG: ${{ inputs.npm-package }}
+      DIR: ${{ needs.check.outputs.dir }}
+      NATIVES: ${{ inputs.natives-dir }}
+      ALIASES: ${{ inputs.alias-dirs }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # Trusted publishing (OIDC) needs npm >= 11.5.1.
+      - run: npm install -g npm@^11.5.1
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Stage natives
+        run: |
+          set -euo pipefail
+          for d in "$NATIVES"/*/; do
+            key=$(basename "$d")
+            src=$(find "artifacts/native-$key" -type f | head -1)
+            test -s "$src"
+            cp "$src" "$d"
+            chmod +x "$d"*
+          done
+          cp README.md LICENSE "$DIR/"
+      - name: Publish to npm (trusted publishing)
+        run: |
+          set -euo pipefail
+          pub() {
+            local dir=$1 name
+            name=$(node -p "require('./$dir/package.json').name")
+            if npm view "$name@$V" version >/dev/null 2>&1; then echo "= $name@$V already live"; return; fi
+            (cd "$dir" && npm publish --access public)
+            echo "+ $name@$V"
+          }
+          for d in "$NATIVES"/*/; do pub "${d%/}"; done
+          pub "$DIR"
+          for a in $ALIASES; do pub "$a"; done
+          # The registry can take minutes to serve new versions; wait once for all.
+          for d in "$NATIVES"/*/ "$DIR" $ALIASES; do
+            name=$(node -p "require('./${d%/}/package.json').name")
+            for i in $(seq 1 120); do npm view "$name@$V" version >/dev/null 2>&1 && break; sleep 5; done
+            npm view "$name@$V" version >/dev/null 2>&1 || { echo "::error::$name@$V not visible after 10 minutes"; exit 1; }
+          done
+      - name: Smoke the published package
+        env:
+          SMOKE: ${{ inputs.smoke }}
+        run: |
+          set -euo pipefail
+          cd "$(mktemp -d)"
+          if [ -n "$SMOKE" ]; then bash -euo pipefail -c "$SMOKE"; else npx -y "$PKG@$V" version; fi
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "v$V" >/dev/null 2>&1; then echo "release v$V exists"; exit 0; fi
+          mkdir -p assets
+          for d in "$NATIVES"/*/; do
+            key=$(basename "$d")
+            if [ -f "$d$NAME.exe" ]; then (cd "$d" && zip -q "$GITHUB_WORKSPACE/assets/$NAME-$key.zip" "$NAME.exe")
+            else tar -C "$d" -czf "assets/$NAME-$key.tar.gz" "$NAME"; fi
+          done
+          notes=$(awk -v v="## $V" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md 2>/dev/null || true)
+          gh release create "v$V" assets/* --target "$GITHUB_SHA" --title "$NAME $V" --notes "${notes:-$NAME $V}"
+      - name: Move the major tag
+        if: inputs.major-tag
+        run: |
+          set -euo pipefail
+          git tag -f "v${V%%.*}" "$GITHUB_SHA"
+          git push -f origin "refs/tags/v${V%%.*}"
+      - name: Publish to the MCP Registry
+        env:
+          MCP_NAME: ${{ inputs.mcp-name }}
+        run: |
+          set -euo pipefail
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher validate
+          ./mcp-publisher login github-oidc
+          enc=$(node -p "encodeURIComponent(process.argv[1])" "$MCP_NAME")
+          if curl -fsS "https://registry.modelcontextprotocol.io/v0.1/servers/$enc/versions/$V" >/dev/null 2>&1; then
+            echo "$MCP_NAME $V already in the registry"
+          else
+            ./mcp-publisher publish
+          fi
+
+  docker:
+    needs: [check, build]
+    if: inputs.docker-image != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    env:
+      V: ${{ needs.check.outputs.version }}
+      NAME: ${{ inputs.name }}
+      IMAGE: ${{ inputs.docker-image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-linux-*
+          path: artifacts
+      - name: Stage prebuilt linux binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist/amd64 dist/arm64
+          cp "artifacts/native-linux-x64-gnu/$NAME" dist/amd64/
+          cp "artifacts/native-linux-arm64-gnu/$NAME" dist/arm64/
+          chmod +x dist/*/"$NAME"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.V }},${{ env.IMAGE }}:latest
+      - name: Read back the image
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$IMAGE:$V"
+          docker run --rm --entrypoint "$NAME" "$IMAGE:$V" version
+
+  registry-retired:
+    if: inputs.retired-mcp-names != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Deprecate retired MCP Registry names
+        env:
+          RETIRED: ${{ inputs.retired-mcp-names }}
+          MESSAGE: ${{ inputs.retired-message }}
+        run: |
+          set -euo pipefail
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher login github-oidc
+          for retired in $RETIRED; do
+            enc=$(node -p "encodeURIComponent(process.argv[1])" "$retired")
+            url="https://registry.modelcontextprotocol.io/v0.1/servers/$enc/versions/latest"
+            deprecated() { curl -fsS "$url" | jq -e '._meta["io.modelcontextprotocol.registry/official"].status == "deprecated"' >/dev/null; }
+            if deprecated; then echo "$retired already deprecated"; continue; fi
+            ok=false
+            for attempt in 1 2 3 4 5; do
+              # --yes skips the bulk-operation prompt (no stdin in CI).
+              if out=$(./mcp-publisher status --status deprecated --all-versions --yes --message "$MESSAGE" "$retired" 2>&1) \
+                 || grep -qE 'already set to the provided values|No changes to apply' <<<"$out"; then ok=true; break; fi
+              echo "attempt $attempt: $out"; sleep $((attempt * 15))
+            done
+            [ "$ok" = true ] || { echo "::error::could not deprecate $retired"; exit 1; }
+            for i in $(seq 1 24); do deprecated && break; sleep 5; done
+            deprecated || { echo "::error::$retired deprecation readback failed"; exit 1; }
+          done

@@ -1,0 +1,25 @@
+[package]
+name = "sylphx-mcp-kit"
+description = "Shared parts of Sylphx MCP servers: a stdio MCP server on rmcp, workspace roots, and `setup` for MCP clients."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["mcp", "model-context-protocol", "rmcp", "cli"]
+categories = ["development-tools"]
+
+[lib]
+name = "mcp_kit"
+
+[dependencies]
+anyhow = "1"
+dirs = "6"
+rmcp = { version = "3.4", default-features = false, features = ["server", "transport-io"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "io-std"] }
+toml_edit = "0.23"
+
+[dev-dependencies]
+rmcp = { version = "3.4", default-features = false, features = ["server", "client", "transport-io"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "io-std", "io-util", "macros"] }
