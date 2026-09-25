@@ -4,11 +4,22 @@ Shared parts of the Sylphx MCP servers ([repomap](https://github.com/SylphxAI/re
 
 | Part | What it does |
 |---|---|
-| Rust crate `sylphx-mcp-kit` | Runs an MCP server over stdio on [rmcp](https://github.com/modelcontextprotocol/rust-sdk). Picks the directory a call works on (argument, env var, `--root`, the client's roots, the working directory). Registers the server with MCP clients (`setup`) and adds a Claude Code hook. |
+| Rust crate [`sylphx-mcp-kit`](https://crates.io/crates/sylphx-mcp-kit) | Runs an MCP server over stdio on [rmcp](https://github.com/modelcontextprotocol/rust-sdk). Picks the directory a call works on (argument, env var, `--root`, the client's roots, the working directory). Registers the server with MCP clients (`setup`) and adds a Claude Code hook. With the `embed` feature: local embeddings from a small static model. |
 | `npm/launcher.js` | The `bin` script of an npm package. It runs the native binary for this platform from an optional dependency. |
-| `.github/workflows/release.yml` | A reusable release workflow. It builds 5 native binaries, publishes to npm with trusted publishing, smoke-tests with `npx`, and creates the GitHub release and MCP Registry entry. Optionally it pushes a GHCR image and retires old registry names. |
+| `.github/workflows/release.yml` | A reusable release workflow. It builds 5 native binaries, publishes to npm with trusted publishing, smoke-tests with `npx`, and creates the GitHub release and MCP Registry entry. Optionally it attaches MCP Bundles (`.mcpb`), pushes a GHCR image and retires old registry names. |
 
 MIT licensed.
+
+## Install
+
+```toml
+[dependencies]
+sylphx-mcp-kit = "0.2"
+# only the embeddings, without the server and setup parts:
+# sylphx-mcp-kit = { version = "0.2", default-features = false, features = ["embed"] }
+```
+
+Features: `server` and `setup` (default), `embed`. The crate was first used as a git dependency (`git = "https://github.com/SylphxAI/mcp-kit", tag = "v0.1.0"`); those tags stay, and the crates.io release is the same code.
 
 ## Server
 
@@ -75,6 +86,21 @@ Supported clients:
 
 Every change is safe to repeat and is printed. `remove: true` undoes it. `setup::claude_hook` adds, updates or removes a Claude Code hook identified by a marker string.
 
+## Embeddings
+
+```rust
+use mcp_kit::embed::{self, Model, POTION_CODE_16M};
+
+embed::ensure(&POTION_CODE_16M, "tool", "Set TOOL_EMBED=0 to stay keyword-only.")?; // once, 33 MB
+let model = Model::load(&POTION_CODE_16M)?;
+let v = model.embed("where are failed requests retried").unwrap(); // unit length, 256 numbers
+```
+
+- Models: `POTION_CODE_16M` ([potion-code-16M-v2](https://huggingface.co/minishlab/potion-code-16M-v2), code search) and `POTION_RETRIEVAL_32M` (English text). Both are MIT licensed [model2vec](https://github.com/MinishLab/model2vec) static models: an embedding is the mean of the token vectors, so a CPU embeds a large repository in about a second.
+- `ensure` downloads the pinned revision from Hugging Face once, checks its SHA-256, and stores it as int8 in `~/.cache/sylphx/models` (or `SYLPHX_MODEL_DIR`), shared by every tool. It prints one line before downloading. After a failed download it waits an hour before trying again.
+- The tokenizer matches the model's own (BERT normalization and WordPiece). CI checks tokens and vectors against `model2vec` itself.
+- `Vec8`, `quantize` and `cosine` store and compare vectors as int8.
+
 ## npm package
 
 Copy `npm/launcher.js` to `packages/<name>/bin/<name>.js`, and declare one optional dependency per platform:
@@ -119,4 +145,26 @@ npm trusted publishing checks the **calling** workflow file. So every npm packag
 npm trust github @sylphx/tool --file release.yml --repo SylphxAI/tool --allow-publish --otp <code>
 ```
 
-Inputs: `alias-dirs`, `smoke`, `docker-image`, `retired-mcp-names`, `retired-message` and `major-tag`. They are documented in the workflow file.
+Inputs: `alias-dirs`, `smoke`, `docker-image`, `retired-mcp-names`, `retired-message`, `major-tag`, `mcpb` and `mcpb-icon`. They are documented in the workflow file.
+
+### MCP Bundles
+
+`mcpb: true` attaches [MCP Bundles](https://github.com/modelcontextprotocol/mcpb) to the GitHub release, for one-click install in Claude Desktop and other hosts:
+
+- `<name>-<version>.mcpb`: every platform's binary and a small Node launcher (hosts such as Claude Desktop ship Node).
+- `<name>-<version>-<platform>.mcpb`: one binary each, about a fifth of the size.
+
+The manifest comes from `server.json` (title, description, website, arguments) and the npm package (license, keywords). The tool list comes from starting the server once. An optional `mcpb.json` at the repository root is merged into every manifest, for example to ask for a project folder:
+
+```json
+{
+  "server": { "mcp_config": { "env": { "TOOL_ROOT": "${user_config.project}" } } },
+  "user_config": { "project": { "type": "directory", "title": "Project folder", "description": "…", "required": true } }
+}
+```
+
+`mcpb-icon` points at a 512×512 PNG. `scripts/mcpb.mjs` builds the bundles with the official `mcpb` CLI; `scripts/mcpb.test.mjs` checks them.
+
+## Releasing the kit
+
+Bump `version` in `Cargo.toml` and merge. `publish.yml` publishes the crate to crates.io, tags `vX.Y.Z` and moves `v0`, which the servers' release workflows use.
