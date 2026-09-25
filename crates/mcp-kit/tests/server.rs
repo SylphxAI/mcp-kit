@@ -29,7 +29,7 @@ async fn lists_and_calls_tools() {
     tokio::spawn(serve(Echo, server_io));
     let client = ().serve(client_io).await.expect("client connects");
     let info = client.peer_info().expect("server info");
-    assert_eq!(info.server_info.name, "echo");
+    assert_eq!(info.server_info.as_ref().map(|s| s.name.as_str()), Some("echo"));
     assert_eq!(info.instructions.as_deref(), Some("Echoes."));
 
     let tools = client.list_all_tools().await.unwrap();
