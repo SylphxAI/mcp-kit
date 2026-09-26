@@ -186,6 +186,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
+      # cargo-xwin's MSVC CRT and Windows SDK: minutes to download.
+      - if: ${{ matrix.exe }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-0.23.1-x86_64
       - if: ${{ !matrix.exe }}
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
@@ -200,9 +206,15 @@ jobs:
               fetch https://github.com/rust-cross/cargo-xwin/releases/download/v0.23.1/cargo-xwin-v0.23.1.x86_64-unknown-linux-musl.tar.gz xwin.tgz \
                 c492c6dfb7e5ac0eee586b796e0fc950ba13077e7f0bbb046f445d71790d5360
               tar -xzf "$RUNNER_TEMP/xwin.tgz" -C "$RUNNER_TEMP/bin" cargo-xwin
-              # clang is cargo-xwin's clang-cl; wine runs the .exe below.
+              # wine runs the .exe below. Ubuntu 24.04's wine 9.0 aborts in our
+              # runner VMs; this 64-bit-only build runs without i386 libraries.
+              fetch https://github.com/Kron4ek/Wine-Builds/releases/download/11.18/wine-11.18-amd64-wow64.tar.xz wine.txz \
+                f899879b8c37e0b20adca19d147cf77436f3f1a37bf16d08d27fa7137a52b9ba
+              tar -xJf "$RUNNER_TEMP/wine.txz" -C "$RUNNER_TEMP"
+              echo "$RUNNER_TEMP/wine-11.18-amd64-wow64/bin" >> "$GITHUB_PATH"
+              # clang is cargo-xwin's clang-cl.
               sudo apt-get update -qq
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang wine wine64 >/dev/null ;;
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang >/dev/null ;;
             *)
               fetch https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.23.4/cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz zigbuild.txz \
                 6b69963040818ca1ef573d8135a95aa902e17cf7f873c32c6426642dadfe7f59
@@ -219,6 +231,7 @@ jobs:
         env:
           ZIG_TARGET: ${{ matrix.zig }}
           XWIN_ACCEPT_LICENSE: '1'
+          XWIN_ARCH: x86_64
         run: |
           set -euo pipefail
           case "$T" in
