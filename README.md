@@ -149,7 +149,7 @@ npm trusted publishing checks the **calling** workflow file. So every npm packag
 npm trust github @sylphx/tool --file release.yml --repo SylphxAI/tool --allow-publish --otp <code>
 ```
 
-Every job runs on our own Linux runners (`runner`, default `sylphx-linux-standard`). The macOS binaries are linked by zig against the macOS 11.3 SDK, and the Windows one by cargo-xwin; each is checked with `file` and `llvm-objdump`, and the Linux x64 and Windows binaries are run (Windows under wine). The one exception is the `npm` job: npm trusted publishing and provenance accept only GitHub-hosted runners, so it runs on `publish-runner` (default `ubuntu-latest`) and only downloads the built binaries and publishes them.
+Every job runs on our own Linux runners (`runner`, default `sylphx-linux-standard`). All five binaries are cross-compiled there, so a release never waits on the macOS pool: the macOS binaries are linked by zig against the macOS 11.3 SDK, and the Windows one by cargo-xwin; each is checked with `file` and `llvm-objdump`, and the Linux x64 and Windows binaries are run (Windows under wine). The one exception is the `npm` job: npm trusted publishing and provenance accept only GitHub-hosted runners, so it runs on `publish-runner` (default `ubuntu-latest`) and only downloads the built binaries and publishes them.
 
 `build-only: true` builds and checks the binaries (and the image) and publishes nothing. Pass it from a `workflow_dispatch` input to try a build on any branch.
 

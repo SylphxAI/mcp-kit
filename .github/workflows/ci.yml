@@ -72,9 +72,19 @@ jobs:
           fetch-depth: 0
       - uses: SylphxAI/.github/.github/actions/plain-language@f9176dad2e49c6b99d75f1506fafac84632fe870
 
-  # No macOS lane: we host no Apple hardware yet, and the release workflow
-  # cross-builds and checks the Apple binaries. Windows: the tests are
+  # macOS on our macOS pool. Windows, which we do not host: the tests are
   # cross-compiled to MSVC on Linux and run under wine.
+  macos:
+    if: github.event_name != 'merge_group'
+    name: test macos
+    runs-on: [self-hosted, sylphx, macos, standard]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --locked --all-features
+
   windows:
     if: github.event_name != 'merge_group'
     name: test windows (wine)
@@ -116,7 +126,7 @@ jobs:
 
   ci:
     if: always()
-    needs: [test, plain-language, windows]
+    needs: [test, plain-language, macos, windows]
     runs-on: sylphx-linux-standard
     timeout-minutes: 5
     steps:
