@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test:
     if: github.event_name != 'merge_group'
-    runs-on: ubuntu-latest
+    runs-on: sylphx-linux-standard
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +23,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo clippy --locked --no-default-features --features embed -- -D warnings
       - run: cargo test --locked --all-features
@@ -61,7 +64,7 @@ jobs:
 
   plain-language:
     if: github.event_name != 'merge_group'
-    runs-on: ubuntu-latest
+    runs-on: sylphx-linux-standard
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -69,26 +72,62 @@ jobs:
           fetch-depth: 0
       - uses: SylphxAI/.github/.github/actions/plain-language@f9176dad2e49c6b99d75f1506fafac84632fe870
 
-  other-os:
-    if: github.event_name == 'merge_group'
-    # A plain name: GitHub adds the matrix value, and a skipped job does not
-    # show an unexpanded `${{ matrix.os }}`.
-    name: test other OS
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      matrix:
-        os: [macos-latest, windows-latest]
+  # macOS on our macOS pool. Windows, which we do not host: the tests are
+  # cross-compiled to MSVC on Linux and run under wine.
+  macos:
+    if: github.event_name != 'merge_group'
+    name: test macos
+    runs-on: [self-hosted, sylphx, macos, standard]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test --locked --all-features
 
+  windows:
+    if: github.event_name != 'merge_group'
+    name: test windows (wine)
+    runs-on: sylphx-linux-standard
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: windows
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-0.23.1-x86_64
+      - name: cargo-xwin, clang and wine
+        run: |
+          set -euo pipefail
+          fetch() { curl -fsSL -o "$RUNNER_TEMP/$2" "$1"; echo "$3  $RUNNER_TEMP/$2" | sha256sum -c -; }
+          fetch https://github.com/rust-cross/cargo-xwin/releases/download/v0.23.1/cargo-xwin-v0.23.1.x86_64-unknown-linux-musl.tar.gz xwin.tgz \
+            c492c6dfb7e5ac0eee586b796e0fc950ba13077e7f0bbb046f445d71790d5360
+          # Ubuntu 24.04's wine 9.0 aborts in our runner VMs; this 64-bit build runs.
+          fetch https://github.com/Kron4ek/Wine-Builds/releases/download/11.18/wine-11.18-amd64-wow64.tar.xz wine.txz \
+            f899879b8c37e0b20adca19d147cf77436f3f1a37bf16d08d27fa7137a52b9ba
+          mkdir -p "$RUNNER_TEMP/bin" && tar -xzf "$RUNNER_TEMP/xwin.tgz" -C "$RUNNER_TEMP/bin" cargo-xwin
+          tar -xJf "$RUNNER_TEMP/wine.txz" -C "$RUNNER_TEMP"
+          printf '%s\n' "$RUNNER_TEMP/bin" "$RUNNER_TEMP/wine-11.18-amd64-wow64/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang >/dev/null
+      - run: cargo xwin test --locked --all-features --target x86_64-pc-windows-msvc
+        env:
+          XWIN_ACCEPT_LICENSE: '1'
+          XWIN_ARCH: x86_64
+          WINEPREFIX: ${{ runner.temp }}/wine
+          WINEDEBUG: -all
+
   ci:
     if: always()
-    needs: [test, plain-language, other-os]
-    runs-on: ubuntu-latest
+    needs: [test, plain-language, macos, windows]
+    runs-on: sylphx-linux-standard
     timeout-minutes: 5
     steps:
       - env:
