@@ -1,5 +1,9 @@
 # mcp-kit
 
+<p align="center">
+  <img src="https://mark.sylphx.com/api/v1/mark/hero.svg?type=aurora&theme=grape&text=mcp-kit&desc=Shared%20parts%20of%20the%20Sylphx%20MCP%20servers" alt="mcp-kit" width="100%" />
+</p>
+
 Shared parts of the Sylphx MCP servers ([repomap](https://github.com/SylphxAI/repomap), [lockdocs](https://github.com/SylphxAI/lockdocs), [anymd](https://github.com/SylphxAI/anymd)), so each server keeps only its own tools.
 
 | Part | What it does |
