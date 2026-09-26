@@ -5,6 +5,13 @@ name: release (reusable)
 # -> GitHub release -> MCP Registry, plus optional GHCR image and retiring
 # old registry names. No long-lived tokens.
 #
+# Every job runs on our own Linux runners (`runner`), and the macOS and
+# Windows binaries are cross-compiled there. The one exception is the `npm`
+# job on `publish-runner`: npm trusted publishing and provenance accept only
+# GitHub-hosted runners, so that job only downloads the built binaries and
+# runs `npm publish` (owner decision, standards/dx.md). `build-only: true`
+# builds and checks the binaries (and the image) and publishes nothing.
+#
 # Caller (e.g. .github/workflows/release.yml):
 #   on: { push: { branches: [main] }, workflow_dispatch: {} }
 #   jobs:
@@ -81,13 +88,25 @@ on:
         description: 'mcp-kit ref to take scripts/mcpb.mjs from.'
         type: string
         default: v0
+      runner:
+        description: 'Runner for every job except the npm publish.'
+        type: string
+        default: sylphx-linux-standard
+      publish-runner:
+        description: 'Runner for the npm publish job only; trusted publishing needs a GitHub-hosted one.'
+        type: string
+        default: ubuntu-latest
+      build-only:
+        description: 'Build and check the binaries (and the image), publish nothing.'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 5
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -96,6 +115,9 @@ jobs:
       dir: ${{ steps.v.outputs.dir }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - id: v
         env:
           GH_TOKEN: ${{ github.token }}
@@ -134,51 +156,115 @@ jobs:
 
   build:
     needs: check
-    if: needs.check.outputs.publish == 'true'
+    if: needs.check.outputs.publish == 'true' || inputs.build-only
     name: build ${{ matrix.key }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 40
     strategy:
       fail-fast: true
       matrix:
+        # All on Linux: zig links the gnu (glibc 2.17) and Apple targets, with
+        # a versioned zig target keeping Rust's macOS floor (`min`);
+        # cargo-xwin links MSVC. `file` is what `file` must print.
         include:
-          - { key: darwin-arm64, os: macos-latest, target: aarch64-apple-darwin }
-          - { key: darwin-x64, os: macos-latest, target: x86_64-apple-darwin }
-          - { key: linux-x64-gnu, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, zig: '2.17' }
-          - { key: linux-arm64-gnu, os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: '2.17' }
-          - { key: win32-x64-msvc, os: windows-latest, target: x86_64-pc-windows-msvc, exe: '.exe' }
+          - { key: darwin-arm64, target: aarch64-apple-darwin, zig: aarch64-macos.11.0-none, min: '11.0', file: 'Mach-O 64-bit arm64 executable' }
+          - { key: darwin-x64, target: x86_64-apple-darwin, zig: x86_64-macos.10.12-none, min: '10.12', file: 'Mach-O 64-bit x86_64 executable' }
+          - { key: linux-x64-gnu, target: x86_64-unknown-linux-gnu, file: 'ELF 64-bit LSB .*x86-64' }
+          - { key: linux-arm64-gnu, target: aarch64-unknown-linux-gnu, file: 'ELF 64-bit LSB .*ARM aarch64' }
+          - { key: win32-x64-msvc, target: x86_64-pc-windows-msvc, exe: '.exe', file: 'PE32\+ executable \(console\) x86-64' }
+    env:
+      T: ${{ matrix.target }}
+      CARGO_PKG: ${{ needs.check.outputs.cargo }}
+      BIN: ${{ inputs.name }}${{ matrix.exe }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
+          # llvm-objdump for the checks; llvm-ar is cargo-xwin's llvm-lib.
+          components: llvm-tools
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
-      - if: matrix.zig
+      - if: ${{ !matrix.exe }}
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: 0.14.1
-      - if: matrix.zig
-        run: cargo install cargo-zigbuild --version 0.23.0 --locked
-      - name: Build
-        shell: bash
-        env:
-          CARGO_PKG: ${{ needs.check.outputs.cargo }}
-          BIN: ${{ inputs.name }}${{ matrix.exe }}
+          version: 0.16.0
+      - name: Cross tools
         run: |
           set -euo pipefail
-          if [ -n "${{ matrix.zig }}" ]; then
-            cargo zigbuild --release --locked -p "$CARGO_PKG" --target ${{ matrix.target }}.${{ matrix.zig }}
-          else
-            cargo build --release --locked -p "$CARGO_PKG" --target ${{ matrix.target }}
-          fi
+          fetch() { curl -fsSL -o "$RUNNER_TEMP/$2" "$1"; echo "$3  $RUNNER_TEMP/$2" | sha256sum -c -; }
+          mkdir -p "$RUNNER_TEMP/bin" && echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          case "$T" in
+            *-windows-msvc)
+              fetch https://github.com/rust-cross/cargo-xwin/releases/download/v0.23.1/cargo-xwin-v0.23.1.x86_64-unknown-linux-musl.tar.gz xwin.tgz \
+                c492c6dfb7e5ac0eee586b796e0fc950ba13077e7f0bbb046f445d71790d5360
+              tar -xzf "$RUNNER_TEMP/xwin.tgz" -C "$RUNNER_TEMP/bin" cargo-xwin
+              # clang is cargo-xwin's clang-cl; wine runs the .exe below.
+              sudo apt-get update -qq
+              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang wine wine64 >/dev/null ;;
+            *)
+              fetch https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.23.4/cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz zigbuild.txz \
+                6b69963040818ca1ef573d8135a95aa902e17cf7f873c32c6426642dadfe7f59
+              tar -xJf "$RUNNER_TEMP/zigbuild.txz" -C "$RUNNER_TEMP/bin" --strip-components 1 cargo-zigbuild-x86_64-unknown-linux-gnu/cargo-zigbuild ;;
+          esac
+          case "$T" in
+            *-apple-darwin)
+              fetch https://github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX11.3.sdk.tar.xz sdk.txz \
+                cd4f08a75577145b8f05245a2975f7c81401d75e9535dcffbb879ee1deefcbf4
+              tar -xJf "$RUNNER_TEMP/sdk.txz" -C "$RUNNER_TEMP"
+              echo "SDKROOT=$RUNNER_TEMP/MacOSX11.3.sdk" >> "$GITHUB_ENV" ;;
+          esac
+      - name: Build
+        env:
+          ZIG_TARGET: ${{ matrix.zig }}
+          XWIN_ACCEPT_LICENSE: '1'
+        run: |
+          set -euo pipefail
+          case "$T" in
+            *-linux-gnu) cargo zigbuild --release --locked -p "$CARGO_PKG" --target "$T.2.17" ;;
+            *-windows-msvc) cargo xwin build --release --locked -p "$CARGO_PKG" --target "$T" ;;
+            *-apple-darwin)
+              # cargo-zigbuild gives zig an unversioned macOS target, which links
+              # for macOS 13; this cc names the version (cargo-zigbuild#488).
+              for c in cc c++; do
+                printf '#!/bin/sh\nexec cargo-zigbuild zig %s -- -g -fno-sanitize=all -target %s "$@"\n' "$c" "$ZIG_TARGET" > "$RUNNER_TEMP/bin/zig$c"
+                chmod +x "$RUNNER_TEMP/bin/zig$c"
+              done
+              t=${T//-/_}
+              export "CC_$t=$RUNNER_TEMP/bin/zigcc" "CXX_$t=$RUNNER_TEMP/bin/zigc++" "CARGO_TARGET_${t^^}_LINKER=$RUNNER_TEMP/bin/zigcc"
+              cargo zigbuild --release --locked -p "$CARGO_PKG" --target "$T" ;;
+          esac
           mkdir -p out
-          cp "target/${{ matrix.target }}/release/$BIN" out/
-      - name: Run it (native targets)
-        if: matrix.key != 'linux-arm64-gnu' && matrix.key != 'darwin-x64'
-        shell: bash
-        run: ./out/${{ inputs.name }}${{ matrix.exe }} version
+          cp "target/$T/release/$BIN" out/
+      - name: Check the binary
+        env:
+          FILE: ${{ matrix.file }}
+          MIN: ${{ matrix.min }}
+        run: |
+          set -euo pipefail
+          b="out/$BIN"
+          od="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/llvm-objdump"
+          file "$b"
+          file "$b" | grep -Eq "$FILE"
+          case "$T" in
+            *-linux-gnu)
+              glibc=$("$od" -T "$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+              echo "needs $glibc"
+              test "$(printf '%s\nGLIBC_2.17\n' "$glibc" | sort -V | tail -1)" = GLIBC_2.17 ;;
+            *-apple-darwin)
+              "$od" --macho --private-headers "$b" > headers.txt
+              "$od" --macho --dylibs-used "$b" | tail -n +2 | awk '{print $1}' > dylibs.txt
+              cat dylibs.txt
+              grep -Eq "(minos|version) $MIN\$" headers.txt
+              # Apple silicon runs only signed code; zig signs ad hoc.
+              if [ "$T" = aarch64-apple-darwin ]; then grep -q 'cmd LC_CODE_SIGNATURE' headers.txt; fi
+              if grep -Ev '^(/usr/lib/|/System/Library/Frameworks/)' dylibs.txt; then echo "::error::links a library macOS does not ship"; exit 1; fi ;;
+          esac
+          case "$T" in
+            x86_64-unknown-linux-gnu) "./$b" version ;;
+            *-windows-msvc) WINEPREFIX="$RUNNER_TEMP/wine" WINEDEBUG=-all wine "$b" version ;;
+          esac
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.key }}
@@ -186,14 +272,17 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
+  # The only job off our runners (see the header): it takes the built
+  # binaries and publishes, nothing else.
+  npm:
     needs: [check, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: needs.check.outputs.publish == 'true' && !inputs.build-only
+    runs-on: ${{ inputs.publish-runner }}
+    timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
       id-token: write
-    env:
+    env: &release-env
       V: ${{ needs.check.outputs.version }}
       NAME: ${{ inputs.name }}
       PKG: ${{ inputs.npm-package }}
@@ -201,19 +290,23 @@ jobs:
       NATIVES: ${{ inputs.natives-dir }}
       ALIASES: ${{ inputs.alias-dirs }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - &checkout
+        uses: actions/checkout@v4
+      - &node
+        uses: actions/setup-node@v4
         with:
           node-version: '24'
       # Trusted publishing (OIDC) needs npm >= 11.5.1.
       - run: npm install -g npm@^11.5.1
       # Only the binaries: a re-run also sees other artifacts of the run,
       # such as the Docker build record.
-      - uses: actions/download-artifact@v4
+      - &natives
+        uses: actions/download-artifact@v4
         with:
           pattern: native-*
           path: artifacts
-      - name: Stage natives
+      - &stage
+        name: Stage natives
         run: |
           set -euo pipefail
           for d in "$NATIVES"/*/; do
@@ -237,6 +330,23 @@ jobs:
           for d in "$NATIVES"/*/; do pub "${d%/}"; done
           pub "$DIR"
           for a in $ALIASES; do pub "$a"; done
+
+  release:
+    needs: [check, npm]
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+    env: *release-env
+    steps:
+      - *checkout
+      - *node
+      - *natives
+      - *stage
+      - name: Wait for npm to serve the version
+        run: |
+          set -euo pipefail
           # The registry can take minutes to serve new versions; wait once for all.
           for d in "$NATIVES"/*/ "$DIR" $ALIASES; do
             name=$(node -p "require('./${d%/}/package.json').name")
@@ -305,7 +415,7 @@ jobs:
   docker:
     needs: [check, build]
     if: inputs.docker-image != ''
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -339,22 +449,24 @@ jobs:
           context: .
           file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
-          push: true
+          push: ${{ !inputs.build-only }}
           tags: ${{ env.IMAGE }}:${{ env.V }},${{ env.IMAGE }}:latest
       - name: Read back the image
+        if: ${{ !inputs.build-only }}
         run: |
           set -euo pipefail
           docker buildx imagetools inspect "$IMAGE:$V"
           docker run --rm --entrypoint "$NAME" "$IMAGE:$V" version
 
   registry-retired:
-    if: inputs.retired-mcp-names != ''
-    runs-on: ubuntu-latest
+    if: inputs.retired-mcp-names != '' && !inputs.build-only
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
     steps:
+      - *node
       - name: Deprecate retired MCP Registry names
         env:
           RETIRED: ${{ inputs.retired-mcp-names }}

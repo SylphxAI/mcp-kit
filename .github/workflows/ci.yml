@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test:
     if: github.event_name != 'merge_group'
-    runs-on: ubuntu-latest
+    runs-on: sylphx-linux-standard
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +23,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo clippy --locked --no-default-features --features embed -- -D warnings
       - run: cargo test --locked --all-features
@@ -61,7 +64,7 @@ jobs:
 
   plain-language:
     if: github.event_name != 'merge_group'
-    runs-on: ubuntu-latest
+    runs-on: sylphx-linux-standard
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -69,26 +72,41 @@ jobs:
           fetch-depth: 0
       - uses: SylphxAI/.github/.github/actions/plain-language@f9176dad2e49c6b99d75f1506fafac84632fe870
 
-  other-os:
-    if: github.event_name == 'merge_group'
-    # A plain name: GitHub adds the matrix value, and a skipped job does not
-    # show an unexpanded `${{ matrix.os }}`.
-    name: test other OS
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    strategy:
-      matrix:
-        os: [macos-latest, windows-latest]
+  # No macOS lane: we host no Apple hardware yet, and the release workflow
+  # cross-builds and checks the Apple binaries. Windows: the tests are
+  # cross-compiled to MSVC on Linux and run under wine.
+  windows:
+    if: github.event_name != 'merge_group'
+    name: test windows (wine)
+    runs-on: sylphx-linux-standard
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: llvm-tools
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test --locked --all-features
+        with:
+          key: windows
+      - name: cargo-xwin, clang and wine
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/xwin.tgz" https://github.com/rust-cross/cargo-xwin/releases/download/v0.23.1/cargo-xwin-v0.23.1.x86_64-unknown-linux-musl.tar.gz
+          echo "c492c6dfb7e5ac0eee586b796e0fc950ba13077e7f0bbb046f445d71790d5360  $RUNNER_TEMP/xwin.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/xwin.tgz" -C "$HOME/.cargo/bin" cargo-xwin
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang wine wine64 >/dev/null
+      - run: cargo xwin test --locked --all-features --target x86_64-pc-windows-msvc
+        env:
+          XWIN_ACCEPT_LICENSE: '1'
+          WINEPREFIX: ${{ runner.temp }}/wine
+          WINEDEBUG: -all
 
   ci:
     if: always()
-    needs: [test, plain-language, other-os]
-    runs-on: ubuntu-latest
+    needs: [test, plain-language, windows]
+    runs-on: sylphx-linux-standard
     timeout-minutes: 5
     steps:
       - env:
