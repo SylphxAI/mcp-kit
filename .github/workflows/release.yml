@@ -98,6 +98,7 @@ jobs:
       - uses: actions/checkout@v4
       - id: v
         env:
+          GH_TOKEN: ${{ github.token }}
           NAME: ${{ inputs.name }}
           PKG: ${{ inputs.npm-package }}
           DIR: ${{ inputs.package-dir }}
@@ -122,7 +123,13 @@ jobs:
             echo "version=$V"
             echo "dir=$DIR"
             echo "cargo=${CARGO:-$NAME}"
-            if npm view "$PKG@$V" version >/dev/null 2>&1; then echo "publish=false"; else echo "publish=true"; fi
+            # New on npm, or on npm without its GitHub release yet (a run that
+            # stopped after publishing): the steps that already ran are skipped.
+            if ! npm view "$PKG@$V" version >/dev/null 2>&1 || ! gh release view "v$V" >/dev/null 2>&1; then
+              echo "publish=true"
+            else
+              echo "publish=false"
+            fi
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -200,8 +207,11 @@ jobs:
           node-version: '24'
       # Trusted publishing (OIDC) needs npm >= 11.5.1.
       - run: npm install -g npm@^11.5.1
+      # Only the binaries: a re-run also sees other artifacts of the run,
+      # such as the Docker build record.
       - uses: actions/download-artifact@v4
         with:
+          pattern: native-*
           path: artifacts
       - name: Stage natives
         run: |

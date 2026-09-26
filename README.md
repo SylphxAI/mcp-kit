@@ -137,7 +137,7 @@ jobs:
       mcp-name: io.github.SylphxAI/tool
 ```
 
-A release happens when `packages/<name>/package.json` has a version that is not on npm yet. All manifests must carry that version, including `server.json` and the platform packages. The workflow checks this first.
+A release happens when `packages/<name>/package.json` has a version that is not on npm yet, or that is on npm but has no GitHub release (a run that stopped halfway; run the workflow again and it finishes, skipping what is done). All manifests must carry that version, including `server.json` and the platform packages. The workflow checks this first.
 
 npm trusted publishing checks the **calling** workflow file. So every npm package trusts `<owner>/<repo>` with the file `release.yml`:
 
@@ -167,4 +167,4 @@ The manifest comes from `server.json` (title, description, website, arguments) a
 
 ## Releasing the kit
 
-Bump `version` in `Cargo.toml` and merge. `publish.yml` publishes the crate to crates.io, tags `vX.Y.Z` and moves `v0`, which the servers' release workflows use.
+Bump `version` in `Cargo.toml` and merge. `publish.yml` publishes the crate to crates.io, tags `vX.Y.Z` and moves `v0`, which the servers' release workflows use. A change to the release workflow reaches the servers only with a version bump.
