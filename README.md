@@ -10,7 +10,7 @@ Shared parts of the Sylphx MCP servers ([repomap](https://github.com/SylphxAI/re
 |---|---|
 | Rust crate [`sylphx-mcp-kit`](https://crates.io/crates/sylphx-mcp-kit) | Runs an MCP server over stdio on [rmcp](https://github.com/modelcontextprotocol/rust-sdk). Picks the directory a call works on (argument, env var, `--root`, the client's roots, the working directory). Registers the server with MCP clients (`setup`) and adds a Claude Code hook. With the `embed` feature: local embeddings from a small static model. |
 | `npm/launcher.js` | The `bin` script of an npm package. It runs the native binary for this platform from an optional dependency. |
-| `.github/workflows/release.yml` | A reusable release workflow. It cross-compiles 5 native binaries on our Linux runners, publishes to npm with trusted publishing, smoke-tests with `npx`, and creates the GitHub release and MCP Registry entry. Optionally it attaches MCP Bundles (`.mcpb`), pushes a GHCR image and retires old registry names. |
+| `.github/workflows/release.yml` | A reusable release workflow. It builds 5 native binaries, publishes to npm with trusted publishing, smoke-tests with `npx`, and creates the GitHub release and MCP Registry entry. Optionally it attaches MCP Bundles (`.mcpb`), pushes a GHCR image and retires old registry names. |
 
 MIT licensed.
 
@@ -149,11 +149,7 @@ npm trusted publishing checks the **calling** workflow file. So every npm packag
 npm trust github @sylphx/tool --file release.yml --repo SylphxAI/tool --allow-publish --otp <code>
 ```
 
-Every job runs on our own Linux runners (`runner`, default `sylphx-linux-standard`). All five binaries are cross-compiled there, so a release never waits on the macOS pool: the macOS binaries are linked by zig against the macOS 11.3 SDK, and the Windows one by cargo-xwin; each is checked with `file` and `llvm-objdump`, and the Linux x64 and Windows binaries are run (Windows under wine). The one exception is the `npm` job: npm trusted publishing and provenance accept only GitHub-hosted runners, so it runs on `publish-runner` (default `ubuntu-latest`) and only downloads the built binaries and publishes them.
-
-`build-only: true` builds and checks the binaries (and the image) and publishes nothing. Pass it from a `workflow_dispatch` input to try a build on any branch.
-
-Inputs: `alias-dirs`, `smoke`, `docker-image`, `retired-mcp-names`, `retired-message`, `major-tag`, `mcpb`, `mcpb-icon`, `runner`, `publish-runner` and `build-only`. They are documented in the workflow file.
+Inputs: `alias-dirs`, `smoke`, `docker-image`, `retired-mcp-names`, `retired-message`, `major-tag`, `mcpb` and `mcpb-icon`. They are documented in the workflow file.
 
 ### MCP Bundles
 
