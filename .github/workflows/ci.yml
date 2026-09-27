@@ -70,7 +70,6 @@ jobs:
       - uses: SylphxAI/.github/.github/actions/plain-language@f9176dad2e49c6b99d75f1506fafac84632fe870
 
   other-os:
-    if: github.event_name == 'merge_group'
     # A plain name: GitHub adds the matrix value, and a skipped job does not
     # show an unexpanded `${{ matrix.os }}`.
     name: test other OS
