@@ -69,6 +69,19 @@ jobs:
           fetch-depth: 0
       - uses: SylphxAI/.github/.github/actions/plain-language@f9176dad2e49c6b99d75f1506fafac84632fe870
 
+  identifiers:
+    if: github.event_name != 'merge_group'
+    name: Identifiers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Non-v7 ids on added lines (owner standards/identifiers.md)
+        uses: SylphxAI/.github/.github/actions/identifiers@e4a5ea41cbcc87cd93914f89f0d7c3981c868bf9
+
   other-os:
     # A plain name: GitHub adds the matrix value, and a skipped job does not
     # show an unexpanded `${{ matrix.os }}`.
@@ -86,7 +99,7 @@ jobs:
 
   ci:
     if: always()
-    needs: [test, plain-language, other-os]
+    needs: [test, plain-language, identifiers, other-os]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
