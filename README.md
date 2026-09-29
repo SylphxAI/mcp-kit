@@ -23,7 +23,7 @@ sylphx-mcp-kit = "0.2"
 # sylphx-mcp-kit = { version = "0.2", default-features = false, features = ["embed"] }
 ```
 
-Features: `server` and `setup` (default), `embed`. The crate was first used as a git dependency (`git = "https://github.com/SylphxAI/mcp-kit", tag = "v0.1.0"`); those tags stay, and the crates.io release is the same code.
+Features: `server` and `setup` (default), `embed`.
 
 ## Server
 
@@ -59,13 +59,11 @@ fn main() -> anyhow::Result<()> {
 
 ### Why rmcp
 
-The servers first used about 200 lines of hand-written JSON-RPC each. rmcp is the official Rust SDK, kept in step with the MCP spec. It handles what the hand-written loops did not:
+rmcp is the official Rust SDK, kept in step with the MCP spec, so a server needs no hand-written JSON-RPC loop. It handles:
 - protocol version negotiation over every published version
 - cancellation, progress and logging
 - pagination and result caching fields
 - tasks, and structured and error results with the right shape for each protocol version
-
-The binary cost is measured in each migration PR.
 
 ## Setup
 
