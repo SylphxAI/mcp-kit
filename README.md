@@ -18,12 +18,12 @@ MIT licensed.
 
 ```toml
 [dependencies]
-sylphx-mcp-kit = "0.2"
+sylphx-mcp-kit = "0.3"
 # only the embeddings, without the server and setup parts:
-# sylphx-mcp-kit = { version = "0.2", default-features = false, features = ["embed"] }
+# sylphx-mcp-kit = { version = "0.3", default-features = false, features = ["embed"] }
 ```
 
-Features: `server` and `setup` (default), `embed`.
+Features: `server` and `setup` (default), `embed`, `search`. Cache roots and CLI hints need no feature.
 
 ## Server
 
@@ -102,6 +102,24 @@ let v = model.embed("where are failed requests retried").unwrap(); // unit lengt
 - `ensure` downloads the pinned revision from Hugging Face once, checks its SHA-256, and stores it as int8 in `~/.cache/sylphx/models` (or `SYLPHX_MODEL_DIR`), shared by every tool. It prints one line before downloading. After a failed download it waits an hour before trying again.
 - The tokenizer matches the model's own (BERT normalization and WordPiece). CI checks tokens and vectors against `model2vec` itself.
 - `Vec8`, `quantize` and `cosine` store and compare vectors as int8.
+
+## Search and CLI helpers
+
+- `search` owns identifier splitting, `tokenize`, `path_terms`, `chunk_terms`
+  and UTF-8-safe byte limits (`floor_char`). Ranking stays in each tool.
+- `star_hint::after_success(message, opt_out_env, state_dir, mcp)` prints once,
+  after the fifth successful interactive CLI run. It never counts or prints
+  in MCP mode, with non-TTY stderr, in CI, or when opted out. It keeps the
+  existing `star-hint` counter format; callers choose their cache root.
+- `cache::root(env, product_dir, fallback, override_policy)` preserves the
+  caller's cache rules: OS cache with temp/no fallback, or environment-only
+  platform paths. Overrides are either nonempty OS strings or UTF-8 strings
+  including empty strings. Callers keep their own layout and retention.
+- `embed::ensure_at` and `Model::load_dir` support existing model caches and
+  full model URL overrides. `Tokenization::Identifiers` keeps the original
+  identifier-aware, untruncated vectors; the default model2vec behavior is
+  unchanged. The `model.q8`, `vocab.txt` and serialized `Vec8` formats are
+  unchanged, so existing embedding indexes stay readable.
 
 ## npm package
 

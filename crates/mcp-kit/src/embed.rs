@@ -64,10 +64,7 @@ const RETRY_AFTER: Duration = Duration::from_secs(3600);
 
 /// Where models are cached: `SYLPHX_MODEL_DIR`, else `<cache>/sylphx/models`.
 pub fn models_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("SYLPHX_MODEL_DIR").filter(|d| !d.is_empty()) {
-        return PathBuf::from(d);
-    }
-    dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("sylphx").join("models")
+    crate::cache::root("SYLPHX_MODEL_DIR", "sylphx/models", crate::cache::Fallback::Temp, crate::cache::Override::NonEmpty).expect("temporary cache fallback")
 }
 
 fn model_dir(spec: &Spec) -> PathBuf {
@@ -76,8 +73,12 @@ fn model_dir(spec: &Spec) -> PathBuf {
 
 /// Is the model downloaded and converted?
 pub fn installed(spec: &Spec) -> bool {
-    let d = model_dir(spec);
-    d.join("model.q8").is_file() && d.join("vocab.txt").is_file()
+    installed_at(&model_dir(spec))
+}
+
+/// Is a model in a caller-selected directory downloaded and converted?
+pub fn installed_at(dir: &Path) -> bool {
+    dir.join("model.q8").is_file() && dir.join("vocab.txt").is_file()
 }
 
 /// Download, verify and convert the model if it is missing. Before
@@ -85,11 +86,16 @@ pub fn installed(spec: &Spec) -> bool {
 /// with `hint` (e.g. how to turn embeddings off). After a failure it does not
 /// try again for an hour, so offline runs stay fast.
 pub fn ensure(spec: &Spec, app: &str, hint: &str) -> Result<()> {
-    if installed(spec) {
+    ensure_at(spec, &model_dir(spec), app, hint, None)
+}
+
+/// Ensure a model in a caller-selected directory. `base_url` overrides the
+/// full model URL (not a parent directory). The on-disk format is unchanged.
+pub fn ensure_at(spec: &Spec, dir: &Path, app: &str, hint: &str, base_url: Option<&str>) -> Result<()> {
+    if installed_at(dir) {
         return Ok(());
     }
-    let dir = model_dir(spec);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let failed = dir.join("download-failed");
     if let Ok(t) = std::fs::metadata(&failed).and_then(|m| m.modified()) {
         if SystemTime::now().duration_since(t).unwrap_or_default() < RETRY_AFTER {
@@ -102,7 +108,7 @@ pub fn ensure(spec: &Spec, app: &str, hint: &str) -> Result<()> {
         spec.weights_bytes.div_ceil(1_000_000),
         dir.display()
     );
-    let r = download(spec, &dir);
+    let r = download(spec, dir, base_url);
     match &r {
         Ok(()) => {
             let _ = std::fs::remove_file(&failed);
@@ -114,10 +120,10 @@ pub fn ensure(spec: &Spec, app: &str, hint: &str) -> Result<()> {
     r
 }
 
-fn download(spec: &Spec, dir: &Path) -> Result<()> {
-    let base = std::env::var("SYLPHX_MODEL_URL")
+fn download(spec: &Spec, dir: &Path, base_url: Option<&str>) -> Result<()> {
+    let base = base_url.map(str::to_owned).unwrap_or_else(|| std::env::var("SYLPHX_MODEL_URL")
         .map(|b| format!("{}/{}", b.trim_end_matches('/'), spec.id))
-        .unwrap_or_else(|_| format!("https://huggingface.co/{}/resolve/{}", spec.repo, spec.revision));
+        .unwrap_or_else(|_| format!("https://huggingface.co/{}/resolve/{}", spec.repo, spec.revision)));
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(900)))
         .user_agent(concat!("sylphx-mcp-kit/", env!("CARGO_PKG_VERSION")))
@@ -247,6 +253,17 @@ impl std::hash::Hasher for Fx {
     }
 }
 
+/// Input policy. The default matches model2vec; identifier mode preserves
+/// existing identifier-aware text indexes without changing their vectors.
+#[derive(Clone, Copy, Default)]
+pub enum Tokenization {
+    #[default]
+    Model2Vec,
+    /// Split camelCase and underscores before WordPiece; lowercase without
+    /// accent stripping or CJK spacing, and do not truncate the text.
+    Identifiers,
+}
+
 /// A loaded static embedding model.
 pub struct Model {
     /// Word-initial pieces and `##` continuation pieces (stored without `##`).
@@ -258,6 +275,7 @@ pub struct Model {
     scale: Vec<f32>,
     /// `model2vec` cuts a text to MAX_TOKENS × this many characters first.
     median_token_chars: usize,
+    tokenization: Tokenization,
 }
 
 impl Model {
@@ -308,7 +326,13 @@ impl Model {
             l if l % 2 == 1 => lens[l / 2],
             l => (lens[l / 2 - 1] + lens[l / 2]) / 2,
         };
-        Model { first, cont, dims, q, scale, median_token_chars: median_token_chars.max(1) }
+        Model { first, cont, dims, q, scale, median_token_chars: median_token_chars.max(1), tokenization: Tokenization::default() }
+    }
+
+    /// Choose how inputs are tokenized, without changing model weights.
+    pub fn with_tokenization(mut self, tokenization: Tokenization) -> Self {
+        self.tokenization = tokenization;
+        self
     }
 
     pub fn dims(&self) -> usize {
@@ -317,6 +341,13 @@ impl Model {
 
     /// Token ids of a text (unknown words dropped, at most `MAX_TOKENS`).
     pub fn tokenize(&self, text: &str) -> Vec<u32> {
+        if matches!(self.tokenization, Tokenization::Identifiers) {
+            let mut ids = Vec::new();
+            for word in identifier_words(text) {
+                self.wordpiece(&word, &mut ids);
+            }
+            return ids;
+        }
         let cut = MAX_TOKENS * self.median_token_chars;
         let text = match text.char_indices().nth(cut) {
             Some((i, _)) => &text[..i],
@@ -492,6 +523,41 @@ fn is_punct(c: char) -> bool {
     matches!(c as u32, 0x2010..=0x2027 | 0x2030..=0x205E | 0x3000..=0x303F | 0xFF01..=0xFF0F | 0xFF1A..=0xFF20 | 0xFF3B..=0xFF40 | 0xFF5B..=0xFF65 | 0x00A1 | 0x00A7 | 0x00AB | 0x00B6 | 0x00B7 | 0x00BB | 0x00BF)
 }
 
+fn identifier_words(text: &str) -> Vec<String> {
+    let mut spaced = String::with_capacity(text.len() + 16);
+    let mut prev: Option<char> = None;
+    for c in text.chars() {
+        if let Some(p) = prev {
+            // camelCase / PascalCase boundary
+            if c.is_uppercase() && p.is_lowercase() {
+                spaced.push(' ');
+            }
+        }
+        spaced.push(if c == '_' { ' ' } else { c });
+        prev = Some(c);
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in spaced.chars() {
+        if c.is_whitespace() || c.is_control() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else if c.is_ascii_punctuation() || (!c.is_alphanumeric() && !c.is_whitespace()) {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            out.push(c.to_string());
+        } else {
+            cur.extend(c.to_lowercase());
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,6 +580,38 @@ mod tests {
         assert!((e.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-4);
         assert!((cosine(&e, &quantize(&e)) - 1.0).abs() < 0.02);
         assert!(m.embed("zzzz").is_none());
+    }
+
+    #[test]
+    fn identifier_policy_preserves_existing_vectors() {
+        let m = toy().with_tokenization(Tokenization::Identifiers);
+        assert_eq!(m.tokenize("read_files"), vec![2, 3, 4]);
+        assert_eq!(m.tokenize("readFile"), vec![2, 3]);
+        assert!(m.tokenize("Café中文").is_empty());
+        assert_eq!(m.tokenize(&"read ".repeat(600)).len(), 600);
+        let vector: Vec8 = serde_json::from_str(r#"{"q":[-1,2],"s":0.5}"#).unwrap();
+        assert_eq!(vector.q, [-1, 2]);
+        assert_eq!(cosine(&[0.0, 1.0], &vector), 1.0);
+    }
+
+    #[test]
+    fn legacy_model_cache_is_readable() {
+        let dir = std::env::temp_dir().join(format!("mcp-kit-legacy-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&0.1f32.to_le_bytes());
+        bytes.extend_from_slice(&0.2f32.to_le_bytes());
+        bytes.extend_from_slice(&[10, 0, 0, 10]);
+        std::fs::write(dir.join("model.q8"), bytes).unwrap();
+        std::fs::write(dir.join("vocab.txt"), "read\nfile").unwrap();
+        let m = Model::load_dir(&dir).unwrap().with_tokenization(Tokenization::Identifiers);
+        assert_eq!(m.tokenize("readFile"), [0, 1]);
+        let v = m.embed("readFile").unwrap();
+        assert!((v[0] - 1.0 / 5.0f32.sqrt()).abs() < 1e-6);
+        assert!((v[1] - 2.0 / 5.0f32.sqrt()).abs() < 1e-6);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

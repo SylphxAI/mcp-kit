@@ -34,6 +34,9 @@ setup = ["dep:toml_edit"]
 # Local embeddings with a static model2vec model (`mcp_kit::embed`).
 embed = ["dep:serde", "dep:sha2", "dep:unicode-normalization", "dep:ureq"]
 
+# Lexical primitives without product ranking.
+search = []
+
 [dev-dependencies]
 rmcp = { version = "3.4", default-features = false, features = ["server", "client", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "io-std", "io-util", "macros"] }

@@ -12,6 +12,10 @@
 
 #[cfg(feature = "embed")]
 pub mod embed;
+pub mod cache;
+pub mod star_hint;
+#[cfg(feature = "search")]
+pub mod search;
 pub mod roots;
 #[cfg(feature = "server")]
 pub mod server;
