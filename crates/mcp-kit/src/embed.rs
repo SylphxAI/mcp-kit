@@ -73,8 +73,12 @@ fn model_dir(spec: &Spec) -> PathBuf {
 
 /// Is the model downloaded and converted?
 pub fn installed(spec: &Spec) -> bool {
-    let d = model_dir(spec);
-    d.join("model.q8").is_file() && d.join("vocab.txt").is_file()
+    installed_at(&model_dir(spec))
+}
+
+/// Is a model in a caller-selected directory downloaded and converted?
+pub fn installed_at(dir: &Path) -> bool {
+    dir.join("model.q8").is_file() && dir.join("vocab.txt").is_file()
 }
 
 /// Download, verify and convert the model if it is missing. Before
@@ -88,7 +92,7 @@ pub fn ensure(spec: &Spec, app: &str, hint: &str) -> Result<()> {
 /// Ensure a model in a caller-selected directory. `base_url` overrides the
 /// full model URL (not a parent directory). The on-disk format is unchanged.
 pub fn ensure_at(spec: &Spec, dir: &Path, app: &str, hint: &str, base_url: Option<&str>) -> Result<()> {
-    if dir.join("model.q8").is_file() && dir.join("vocab.txt").is_file() {
+    if installed_at(dir) {
         return Ok(());
     }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
