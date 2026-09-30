@@ -184,7 +184,7 @@ jobs:
           name: native-${{ matrix.key }}
           path: out/${{ inputs.name }}${{ matrix.exe }}
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
 
   publish:
     needs: [check, build]
