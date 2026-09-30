@@ -118,6 +118,18 @@ mod tests {
     }
 
     #[test]
+    fn file_errors_are_silent_and_mcp_never_writes() {
+        let dir = std::env::temp_dir().join(format!("mcp-kit-star-hint-errors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!apply(&dir, &context(true, false, false)));
+        let path = dir.join(FILE_NAME);
+        let mcp = Context { mcp: true, ..context(true, false, false) };
+        assert!(!apply(&path, &mcp));
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn persists_and_shows_on_the_fifth_run_only() {
         let dir = std::env::temp_dir().join(format!("mcp-kit-star-hint-{}", std::process::id()));
         let path = dir.join("nested").join(FILE_NAME);

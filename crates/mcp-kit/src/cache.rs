@@ -27,7 +27,19 @@ pub enum Override {
 /// Select a cache root. An override is already a product root and is not
 /// suffixed with `product_dir`. Callers own subdirectories and retention.
 pub fn root(env: &str, product_dir: &str, fallback: Fallback, override_policy: Override) -> Option<PathBuf> {
-    root_from(env, product_dir, fallback, override_policy, &|key| std::env::var_os(key), dirs::cache_dir, std::env::temp_dir)
+    root_with_env(env, product_dir, fallback, override_policy, &|key| std::env::var_os(key))
+}
+
+/// Select a root using a supplied environment for the override and the
+/// environment-only fallback. OS and temporary fallbacks use the process.
+pub fn root_with_env(
+    env: &str,
+    product_dir: &str,
+    fallback: Fallback,
+    override_policy: Override,
+    get: &dyn Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    root_from(env, product_dir, fallback, override_policy, get, dirs::cache_dir, std::env::temp_dir)
 }
 
 fn root_from(
