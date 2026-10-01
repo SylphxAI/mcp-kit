@@ -205,13 +205,29 @@ export async function deliveryPlan(config, packages, release, mcp, { repository,
     }
   }
   const canonical = canonicalSource(sources, { repository, commit });
-  const legacy = Boolean(release) && Object.keys(nativeIdentities).length === 0;
-  const wantedAssets = requiredAssets(config.name, config.version, bundles, !legacy);
-  const beforeImage = completion(packages, release, mcp, null, wantedAssets, false);
-  if (legacy && beforeImage.publish) throw new Error('legacy partial release lacks original identities; requested channel recovery requires verified provenance');
-  const docker = await image(imageName, config.version, fetcher, canonical, nativeIdentities, legacy);
-  const done = completion(packages, release, mcp, docker, wantedAssets, Boolean(imageName));
-  if (legacy && done.publish) throw new Error('legacy partial release lacks original identities; requested image recovery requires verified provenance');
+  let legacy = Boolean(release) && Object.keys(nativeIdentities).length === 0;
+  const hydrate = async () => {
+    for (const key of KEYS) {
+      const published = packages[KEYS.indexOf(key)];
+      if (!nativeIdentities[key] && published) {
+        const pkg = config.packages?.find((p) => p.key === key) || published;
+        const { identity } = await npmNative(config, key, pkg, published, canonical, fetcher);
+        nativeIdentities[key] = identity;
+      }
+    }
+    if (!Object.keys(nativeIdentities).length) throw new Error('legacy partial release lacks original identities; requested channel recovery requires verified provenance');
+    legacy = false;
+  };
+  const beforeImage = completion(packages, release, mcp, null, requiredAssets(config.name, config.version, bundles, !legacy), false);
+  // Missing GitHub sidecars do not establish legacy provenance: npm may already
+  // carry original identities from an interrupted modern publication.
+  if (beforeImage.publish && (legacy || packages.some(Boolean))) await hydrate();
+  let docker = await image(imageName, config.version, fetcher, canonical, nativeIdentities, legacy);
+  if (legacy && imageName && !docker) {
+    await hydrate();
+    docker = await image(imageName, config.version, fetcher, canonical, nativeIdentities);
+  }
+  const done = completion(packages, release, mcp, docker, requiredAssets(config.name, config.version, bundles, !legacy), Boolean(imageName));
   return { canonical, done, legacy };
 }
 
@@ -236,6 +252,30 @@ export function verifyNative(identity, name, version, key, bytes, canonical = id
 }
 export function verifyVersion(output, name, version) {
   if (output.trim() !== `${name} ${version}`) throw new Error(`binary must report ${name} ${version}`);
+}
+
+async function npmNative(config, key, pkg, published, canonical, fetcher) {
+  if (!published.dist?.tarball || !published.dist.integrity) throw new Error('legacy partial release: npm binary lacks original build identity');
+  const temporary = mkdtempSync(join(tmpdir(), 'release-npm-'));
+  try {
+    let bytes, identity;
+    const response = await request(published.dist.tarball, {}, fetcher);
+    if (!response) throw new Error('npm recovery tarball disappeared');
+    const data = Buffer.from(await response.arrayBuffer());
+    verifyIntegrity(data, published.dist.integrity);
+    const file = join(temporary, 'native.tgz');
+    writeFileSync(file, data);
+    const manifest = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/package.json'], { encoding: 'utf8' }));
+    if (manifest.name !== pkg.name || manifest.version !== config.version) throw new Error('recovered npm manifest identity mismatch');
+    bytes = execFileSync('tar', ['-xOzf', file, `package/${binary(config.name, key)}`], { maxBuffer: 512 * 1024 * 1024 });
+    // Preserve original identity carried in the signed package, never label
+    // downloaded bytes with a requested version or current checkout.
+    try { identity = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/identity.json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })); }
+    catch { throw new Error('legacy partial release: npm binary lacks original build identity; verified provenance migration required'); }
+    if (published.gitHead !== identity.source?.commit) throw new Error('npm gitHead differs from original build source');
+    verifyNative(identity, config.name, config.version, key, bytes, canonical);
+    return { bytes, identity };
+  } finally { rmSync(temporary, { recursive: true, force: true }); }
 }
 
 export async function recover(config, key, out, fetcher = fetch) {
@@ -265,20 +305,7 @@ export async function recover(config, key, out, fetcher = fetch) {
       identity = original;
       if (!identity) throw new Error('legacy GitHub binary lacks original verified build identity; recover from proven npm package instead');
     } else {
-      const response = await request(published.dist.tarball, {}, fetcher);
-      if (!response) throw new Error('npm recovery tarball disappeared');
-      const data = Buffer.from(await response.arrayBuffer());
-      verifyIntegrity(data, published.dist.integrity);
-      const file = join(temporary, 'native.tgz');
-      writeFileSync(file, data);
-      const manifest = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/package.json'], { encoding: 'utf8' }));
-      if (manifest.name !== pkg.name || manifest.version !== config.version) throw new Error('recovered npm manifest identity mismatch');
-      bytes = execFileSync('tar', ['-xOzf', file, `package/${binary(config.name, key)}`], { maxBuffer: 512 * 1024 * 1024 });
-      // Preserve original identity carried in the signed package, never label
-      // downloaded bytes with a requested version or current checkout.
-      try { identity = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/identity.json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })); }
-      catch { throw new Error('legacy npm binary lacks original build identity; verified provenance migration required'); }
-      if (published.gitHead !== identity.source?.commit) throw new Error('npm gitHead differs from original build source');
+      ({ bytes, identity } = await npmNative(config, key, pkg, published, canonical, fetcher));
     }
     verifyNative(identity, config.name, config.version, key, bytes, canonical);
     mkdirSync(out, { recursive: true });

@@ -276,3 +276,58 @@ test('fully absent anymd 8.3.0 remains a fresh canonical identity-backed release
   assert.deepEqual(result.done, { npm: false, github: false, registry: false, docker: false, publish: true });
   for (const key of KEYS) assert.deepEqual(nativeIdentity('anymd', '8.3.0', key, Buffer.from(key), result.canonical).source, trigger);
 });
+
+test('interrupted modern npm delivery before GitHub sidecars resumes using original embedded identities', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'release-interrupted-'));
+  const name = 'anymd', version = '8.3.0';
+  const tarballs = new Map();
+  const makePackage = (key, source = canonical, withIdentity = true) => {
+    const path = join(root, key);
+    mkdirSync(join(path, 'package'), { recursive: true });
+    const pkg = { key, name: `@sylphx/${name}-${key}`, version, gitHead: canonical.commit };
+    const bytes = Buffer.from(`fixture ${key}`);
+    writeFileSync(join(path, 'package', key.startsWith('win32') ? 'anymd.exe' : 'anymd'), bytes);
+    writeFileSync(join(path, 'package/package.json'), JSON.stringify(pkg));
+    if (withIdentity) writeFileSync(join(path, 'package/identity.json'), JSON.stringify(nativeIdentity(name, version, key, bytes, source)));
+    execFileSync('tar', ['-czf', join(path, 'native.tgz'), '-C', path, 'package']);
+    const tarball = readFileSync(join(path, 'native.tgz'));
+    const url = `https://fixture.test/${key}.tgz`;
+    tarballs.set(url, tarball);
+    return { ...pkg, dist: { tarball: url, integrity: `sha512-${createHash('sha512').update(tarball).digest('base64')}` } };
+  };
+  try {
+    const packages = KEYS.map((key) => makePackage(key));
+    packages.push({ name: '@sylphx/anymd', version, gitHead: canonical.commit });
+    const config = { name, version, packages };
+    const options = { repository: canonical.repository, commit: 'b'.repeat(40), bundles: true };
+    const release = { ...releaseValue, tag_name: `v${version}`, assets: [{ name: `${name}-${version}.mcpb` }] };
+    const fetcher = async (url) => {
+      assert.ok(tarballs.has(url), 'planner only reads immutable npm tarballs');
+      return new Response(tarballs.get(url));
+    };
+    const result = await deliveryPlan(config, packages, release, null, options, fetcher);
+    assert.equal(result.legacy, false);
+    assert.equal(result.canonical.commit, canonical.commit);
+    assert.deepEqual(result.done, { npm: true, github: false, registry: false, docker: true, publish: true });
+    assert.deepEqual(release.assets, [{ name: `${name}-${version}.mcpb` }], 'existing assets unchanged');
+    // Reuse the same loader during actual native recovery; do not regenerate identity.
+    const native = packages[0], out = join(root, 'out');
+    await recover({ ...config, source: result.canonical }, native.key, out, async (url) => {
+      if (tarballs.has(url)) return fetcher(url);
+      if (url.startsWith('https://api.github.com/')) return response(200, release);
+      return response(200, native);
+    });
+    assert.deepEqual(JSON.parse(readFileSync(join(out, 'identity.json'))).source, canonical);
+    const disagreement = [...packages];
+    disagreement[0] = makePackage(KEYS[0], { ...canonical, commit: 'c'.repeat(40) });
+    await assert.rejects(deliveryPlan(config, disagreement, release, null, options, fetcher), /gitHead differs/);
+    disagreement[0] = makePackage(KEYS[0], { ...canonical, repository: 'other/anymd' });
+    await assert.rejects(deliveryPlan(config, disagreement, release, null, options, fetcher), /mixed canonical/);
+    // Clear a previously written sidecar to represent an actual pre-identity tarball.
+    rmSync(join(root, KEYS[0], 'package/identity.json'));
+    disagreement[0] = makePackage(KEYS[0], canonical, false);
+    await assert.rejects(deliveryPlan(config, disagreement, release, null, options, fetcher), /legacy partial.*lacks original/);
+    tarballs.set(packages[1].dist.tarball, Buffer.from('tampered'));
+    await assert.rejects(deliveryPlan(config, packages, release, null, options, fetcher), /integrity mismatch/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
