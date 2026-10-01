@@ -78,7 +78,7 @@ on:
         type: string
         default: ''
       kit-ref:
-        description: 'mcp-kit ref to take scripts/mcpb.mjs from.'
+        description: 'mcp-kit ref for release helpers and MCP Bundles; pin with the reusable workflow.'
         type: string
         default: v0
 
@@ -94,8 +94,19 @@ jobs:
       publish: ${{ steps.v.outputs.publish }}
       cargo: ${{ steps.v.outputs.cargo }}
       dir: ${{ steps.v.outputs.dir }}
+      npm-missing: ${{ steps.v.outputs.npm-missing }}
+      github-missing: ${{ steps.v.outputs.github-missing }}
+      registry-missing: ${{ steps.v.outputs.registry-missing }}
+      docker-missing: ${{ steps.v.outputs.docker-missing }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: SylphxAI/mcp-kit
+          ref: ${{ inputs.kit-ref }}
+          path: .mcp-kit
+          sparse-checkout: scripts
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - id: v
         env:
           GH_TOKEN: ${{ github.token }}
@@ -105,37 +116,24 @@ jobs:
           CARGO: ${{ inputs.cargo-package }}
           NATIVES: ${{ inputs.natives-dir }}
           ALIASES: ${{ inputs.alias-dirs }}
-        run: |
-          set -euo pipefail
-          DIR=${DIR:-packages/$NAME}
-          V=$(node -p "require('./$DIR/package.json').version")
-          # Every manifest carries the same version.
-          node -e '
-            const fs = require("fs"), [v, natives, ...aliases] = process.argv.slice(1);
-            const bad = [];
-            const eq = (what, got) => got !== v && bad.push(`${what}: ${got}`);
-            for (const d of fs.readdirSync(natives)) eq(`${natives}/${d}`, require(`./${natives}/${d}/package.json`).version);
-            for (const d of aliases.filter(Boolean)) eq(d, require(`./${d}/package.json`).version);
-            if (fs.existsSync("server.json")) { const s = require("./server.json"); eq("server.json", s.version); eq("server.json package", s.packages[0].version); }
-            if (bad.length) { console.error(`version mismatch (want ${v}):\n  ${bad.join("\n  ")}`); process.exit(1); }
-          ' "$V" "$NATIVES" $ALIASES
-          {
-            echo "version=$V"
-            echo "dir=$DIR"
-            echo "cargo=${CARGO:-$NAME}"
-            # New on npm, or on npm without its GitHub release yet (a run that
-            # stopped after publishing): the steps that already ran are skipped.
-            if ! npm view "$PKG@$V" version >/dev/null 2>&1 || ! gh release view "v$V" >/dev/null 2>&1; then
-              echo "publish=true"
-            else
-              echo "publish=false"
-            fi
-          } >> "$GITHUB_OUTPUT"
+          MCP_NAME: ${{ inputs.mcp-name }}
+          IMAGE: ${{ inputs.docker-image }}
+          MCPB: ${{ inputs.mcpb }}
+        run: node .mcp-kit/scripts/release.mjs plan
 
   build:
     needs: check
     if: needs.check.outputs.publish == 'true'
     name: build ${{ matrix.key }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NAME: ${{ inputs.name }}
+      PKG: ${{ inputs.npm-package }}
+      DIR: ${{ inputs.package-dir }}
+      CARGO: ${{ inputs.cargo-package }}
+      NATIVES: ${{ inputs.natives-dir }}
+      ALIASES: ${{ inputs.alias-dirs }}
+      MCP_NAME: ${{ inputs.mcp-name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
@@ -149,19 +147,31 @@ jobs:
           - { key: win32-x64-msvc, os: windows-latest, target: x86_64-pc-windows-msvc, exe: '.exe' }
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: actions/checkout@v4
+        with:
+          repository: SylphxAI/mcp-kit
+          ref: ${{ inputs.kit-ref }}
+          path: .mcp-kit
+          sparse-checkout: scripts
+      - id: recovery
+        shell: bash
+        run: node .mcp-kit/scripts/release.mjs recover "${{ matrix.key }}"
+      - if: steps.recovery.outputs.recovered != 'true'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - if: steps.recovery.outputs.recovered != 'true'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
-      - if: matrix.zig
+      - if: matrix.zig && steps.recovery.outputs.recovered != 'true'
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.14.1
-      - if: matrix.zig
+      - if: matrix.zig && steps.recovery.outputs.recovered != 'true'
         run: cargo install cargo-zigbuild --version 0.23.0 --locked
-      - name: Build
+      - name: Build missing native
+        if: steps.recovery.outputs.recovered != 'true'
         shell: bash
         env:
           CARGO_PKG: ${{ needs.check.outputs.cargo }}
@@ -175,14 +185,15 @@ jobs:
           fi
           mkdir -p out
           cp "target/${{ matrix.target }}/release/$BIN" out/
+          node .mcp-kit/scripts/release.mjs identity "${{ matrix.key }}"
       - name: Run it (native targets)
         if: matrix.key != 'linux-arm64-gnu' && matrix.key != 'darwin-x64'
         shell: bash
-        run: ./out/${{ inputs.name }}${{ matrix.exe }} version
+        run: node .mcp-kit/scripts/release.mjs version "./out/${{ inputs.name }}${{ matrix.exe }}"
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.key }}
-          path: out/${{ inputs.name }}${{ matrix.exe }}
+          path: out/*
           if-no-files-found: error
           retention-days: 3
 
@@ -194,6 +205,8 @@ jobs:
       contents: write
       id-token: write
     env:
+      GH_TOKEN: ${{ github.token }}
+      MCP_NAME: ${{ inputs.mcp-name }}
       V: ${{ needs.check.outputs.version }}
       NAME: ${{ inputs.name }}
       PKG: ${{ inputs.npm-package }}
@@ -202,6 +215,12 @@ jobs:
       ALIASES: ${{ inputs.alias-dirs }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: SylphxAI/mcp-kit
+          ref: ${{ inputs.kit-ref }}
+          path: .mcp-kit
+          sparse-checkout: scripts
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -216,21 +235,17 @@ jobs:
       - name: Stage natives
         run: |
           set -euo pipefail
-          for d in "$NATIVES"/*/; do
-            key=$(basename "$d")
-            src=$(find "artifacts/native-$key" -type f | head -1)
-            test -s "$src"
-            cp "$src" "$d"
-            chmod +x "$d"*
-          done
+          node .mcp-kit/scripts/release.mjs stage
           cp README.md LICENSE "$DIR/"
-      - name: Publish to npm (trusted publishing)
+      - name: Publish missing npm packages (trusted publishing)
+        if: needs.check.outputs.npm-missing == 'true'
         run: |
           set -euo pipefail
           pub() {
             local dir=$1 name
             name=$(node -p "require('./$dir/package.json').name")
-            if npm view "$name@$V" version >/dev/null 2>&1; then echo "= $name@$V already live"; return; fi
+            present=$(node .mcp-kit/scripts/release.mjs probe npm "$name" "$V")
+            if [ "$present" = true ]; then echo "= $name@$V already live"; return; fi
             (cd "$dir" && npm publish --access public)
             echo "+ $name@$V"
           }
@@ -240,8 +255,7 @@ jobs:
           # The registry can take minutes to serve new versions; wait once for all.
           for d in "$NATIVES"/*/ "$DIR" $ALIASES; do
             name=$(node -p "require('./${d%/}/package.json').name")
-            for i in $(seq 1 120); do npm view "$name@$V" version >/dev/null 2>&1 && break; sleep 5; done
-            npm view "$name@$V" version >/dev/null 2>&1 || { echo "::error::$name@$V not visible after 10 minutes"; exit 1; }
+            node .mcp-kit/scripts/release.mjs wait npm "$name" "$V"
           done
       - name: Smoke the published package
         env:
@@ -249,16 +263,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "$(mktemp -d)"
+          actual=$(npx -y "$PKG@$V" version)
+          test "$actual" = "$NAME $V"
           if [ -n "$SMOKE" ]; then bash -euo pipefail -c "$SMOKE"; else npx -y "$PKG@$V" version; fi
-      - if: inputs.mcpb
-        uses: actions/checkout@v4
-        with:
-          repository: SylphxAI/mcp-kit
-          ref: ${{ inputs.kit-ref }}
-          path: .mcp-kit
-          sparse-checkout: scripts
       - name: MCP Bundles
-        if: inputs.mcpb
+        if: inputs.mcpb && needs.check.outputs.github-missing == 'true'
         env:
           ICON: ${{ inputs.mcpb-icon }}
         run: |
@@ -267,55 +276,73 @@ jobs:
             --package-dir "$DIR" --out assets ${ICON:+--icon "$ICON"} \
             --tools-from "$NATIVES/linux-x64-gnu/$NAME"
           ls -la assets
-      - name: GitHub release
+      - name: Complete the GitHub release
+        if: needs.check.outputs.github-missing == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if gh release view "v$V" >/dev/null 2>&1; then echo "release v$V exists"; exit 0; fi
+          present=$(node .mcp-kit/scripts/release.mjs probe github "$GITHUB_REPOSITORY" "$V")
           mkdir -p assets
           for d in "$NATIVES"/*/; do
             key=$(basename "$d")
+            cp "artifacts/native-$key/identity.json" "assets/$NAME-$key.identity.json"
             if [ -f "$d$NAME.exe" ]; then (cd "$d" && zip -q "$GITHUB_WORKSPACE/assets/$NAME-$key.zip" "$NAME.exe")
             else tar -C "$d" -czf "assets/$NAME-$key.tar.gz" "$NAME"; fi
           done
           notes=$(awk -v v="## $V" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md 2>/dev/null || true)
-          gh release create "v$V" assets/* --target "$GITHUB_SHA" --title "$NAME $V" --notes "${notes:-$NAME $V}"
+          if [ "$present" = false ]; then
+            gh release create "v$V" assets/* --target "$GITHUB_SHA" --title "$NAME $V" --notes "${notes:-$NAME $V}"
+          else
+            # Keep delivered assets immutable; fill only the missing ones.
+            node .mcp-kit/scripts/release.mjs assets assets/* > missing-assets
+            while IFS= read -r asset; do gh release upload "v$V" "$asset"; done < missing-assets
+          fi
       - name: Move the major tag
         if: inputs.major-tag
         run: |
           set -euo pipefail
           git tag -f "v${V%%.*}" "$GITHUB_SHA"
           git push -f origin "refs/tags/v${V%%.*}"
-      - name: Publish to the MCP Registry
+      - name: Complete the MCP Registry entry
+        if: needs.check.outputs.registry-missing == 'true'
         env:
           MCP_NAME: ${{ inputs.mcp-name }}
         run: |
           set -euo pipefail
-          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
           ./mcp-publisher validate
           ./mcp-publisher login github-oidc
-          enc=$(node -p "encodeURIComponent(process.argv[1])" "$MCP_NAME")
-          if curl -fsS "https://registry.modelcontextprotocol.io/v0.1/servers/$enc/versions/$V" >/dev/null 2>&1; then
-            echo "$MCP_NAME $V already in the registry"
-          else
-            ./mcp-publisher publish
-          fi
+          present=$(node .mcp-kit/scripts/release.mjs probe registry "$MCP_NAME" "$V")
+          if [ "$present" = false ]; then ./mcp-publisher publish; fi
+          node .mcp-kit/scripts/release.mjs wait registry "$MCP_NAME" "$V"
 
   docker:
     needs: [check, build]
-    if: inputs.docker-image != ''
+    if: inputs.docker-image != '' && needs.check.outputs.docker-missing == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
       packages: write
     env:
+      GH_TOKEN: ${{ github.token }}
+      MCP_NAME: ${{ inputs.mcp-name }}
       V: ${{ needs.check.outputs.version }}
       NAME: ${{ inputs.name }}
       IMAGE: ${{ inputs.docker-image }}
+      PKG: ${{ inputs.npm-package }}
+      DIR: ${{ inputs.package-dir }}
+      NATIVES: ${{ inputs.natives-dir }}
+      ALIASES: ${{ inputs.alias-dirs }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: SylphxAI/mcp-kit
+          ref: ${{ inputs.kit-ref }}
+          path: .mcp-kit
+          sparse-checkout: scripts
       - uses: actions/download-artifact@v4
         with:
           pattern: native-linux-*
@@ -323,6 +350,7 @@ jobs:
       - name: Stage prebuilt linux binaries
         run: |
           set -euo pipefail
+          node .mcp-kit/scripts/release.mjs stage linux-x64-gnu linux-arm64-gnu
           mkdir -p dist/amd64 dist/arm64
           cp "artifacts/native-linux-x64-gnu/$NAME" dist/amd64/
           cp "artifacts/native-linux-arm64-gnu/$NAME" dist/arm64/
@@ -345,29 +373,41 @@ jobs:
         run: |
           set -euo pipefail
           docker buildx imagetools inspect "$IMAGE:$V"
-          docker run --rm --entrypoint "$NAME" "$IMAGE:$V" version
+          actual=$(docker run --rm --entrypoint "$NAME" "$IMAGE:$V" version)
+          test "$actual" = "$NAME $V"
+          node .mcp-kit/scripts/release.mjs require image "$IMAGE" "$V"
 
   registry-retired:
-    if: inputs.retired-mcp-names != ''
+    needs: [check, build, publish]
+    # A complete no-op release skips publish. Still verify the replacement;
+    # failure/cancellation must never deprecate its predecessors.
+    if: ${{ !cancelled() && inputs.retired-mcp-names != '' && needs.check.result == 'success' && (needs.publish.result == 'success' || (needs.check.outputs.publish == 'false' && needs.build.result == 'skipped' && needs.publish.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: SylphxAI/mcp-kit
+          ref: ${{ inputs.kit-ref }}
+          path: .mcp-kit
+          sparse-checkout: scripts
       - name: Deprecate retired MCP Registry names
         env:
+          MCP_NAME: ${{ inputs.mcp-name }}
+          V: ${{ needs.check.outputs.version }}
           RETIRED: ${{ inputs.retired-mcp-names }}
           MESSAGE: ${{ inputs.retired-message }}
         run: |
           set -euo pipefail
-          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
           ./mcp-publisher login github-oidc
+          node .mcp-kit/scripts/release.mjs require registry "$MCP_NAME" "$V"
           for retired in $RETIRED; do
-            enc=$(node -p "encodeURIComponent(process.argv[1])" "$retired")
-            url="https://registry.modelcontextprotocol.io/v0.1/servers/$enc/versions/latest"
-            deprecated() { curl -fsS "$url" | jq -e '._meta["io.modelcontextprotocol.registry/official"].status == "deprecated"' >/dev/null; }
-            if deprecated; then echo "$retired already deprecated"; continue; fi
+            deprecated=$(node .mcp-kit/scripts/release.mjs deprecated "$retired")
+            if [ "$deprecated" = true ]; then echo "$retired already deprecated"; continue; fi
             ok=false
             for attempt in 1 2 3 4 5; do
               # --yes skips the bulk-operation prompt (no stdin in CI).
@@ -376,6 +416,11 @@ jobs:
               echo "attempt $attempt: $out"; sleep $((attempt * 15))
             done
             [ "$ok" = true ] || { echo "::error::could not deprecate $retired"; exit 1; }
-            for i in $(seq 1 24); do deprecated && break; sleep 5; done
-            deprecated || { echo "::error::$retired is still not shown as deprecated"; exit 1; }
+            for i in $(seq 1 24); do
+              echo "checking retired status ($i/24)"
+              deprecated=$(node .mcp-kit/scripts/release.mjs deprecated "$retired")
+              if [ "$deprecated" = true ]; then break; fi
+              sleep 5
+            done
+            [ "$deprecated" = true ] || { echo "::error::$retired is still not shown as deprecated"; exit 1; }
           done

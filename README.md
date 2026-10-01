@@ -157,7 +157,15 @@ jobs:
       mcp-name: io.github.SylphxAI/tool
 ```
 
-A release happens when `packages/<name>/package.json` has a version that is not on npm yet, or that is on npm but has no GitHub release (a run that stopped halfway; run the workflow again and it finishes, skipping what is done). All manifests must carry that version, including `server.json` and the platform packages. The workflow checks this first.
+The workflow checks every requested delivery channel: all five native npm packages, the launcher and aliases, the GitHub release assets (including requested bundles), the exact MCP Registry version, and the optional GHCR image. A fresh run finishes missing channels without republishing delivered packages or overwriting existing release assets. HTTP 404 alone means absent; authentication, throttling, server and transport errors stop the run rather than authorizing publication.
+
+The selected Cargo package, npm manifests and `server.json` must carry the same version and publication identity. Executable native targets must report that exact version. Every native artifact carries its platform, version, source and binary SHA-256; staging checks these before publishing, including cross-compiled targets.
+
+Recovery first reuses version-specific GitHub binaries whose digest is provided by the GitHub release API, or the exact native npm package after checking its registry integrity and embedded manifest. Older GitHub assets without digests use the npm fallback. Only a native missing from both verified sources is compiled. Old MCP Registry names are retired only after the replacement's exact version is verified available, including otherwise complete no-op runs.
+
+`kit-ref` supplies the release helpers as well as the bundle builder. When pinning the reusable workflow to a commit, pin `kit-ref` to that same commit. Changes on main do not reach `@v0` callers until the kit's separate version release updates that tag; do not move it while a workflow change is still under review.
+
+The success gates follow [GitHub Actions dependency and status-check semantics](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds). Publisher authentication follows [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/); authentication does not replace artifact identity or delivery readback.
 
 npm trusted publishing checks the **calling** workflow file. So every npm package trusts `<owner>/<repo>` with the file `release.yml`:
 

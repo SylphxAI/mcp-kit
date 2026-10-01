@@ -56,6 +56,8 @@ jobs:
           cp npm/launcher.js "$d/pkg/bin/tool.js"
           set +e; out=$(NODE_PATH="$d/node_modules" node "$d/pkg/bin/tool.js" a b); code=$?; set -e
           test "$out" = "tool a b" && test "$code" = 3
+      - name: Release planning and identity (offline)
+        run: node --test scripts/release.test.mjs
       - name: MCP Bundles build, validate and run
         run: node --test scripts/mcpb.test.mjs
 
