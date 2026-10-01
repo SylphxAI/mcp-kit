@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { KEYS, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, sameSource, deliveryPlan } from './release.mjs';
+import { KEYS, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, sameSource, deliveryPlan, versionCheck, versionSet, readDescriptor, expandFiles } from './release.mjs';
 
 const response = (status, value) => new Response(JSON.stringify(value), { status });
 const fixture = (value) => async () => response(200, value);
@@ -329,5 +329,174 @@ test('interrupted modern npm delivery before GitHub sidecars resumes using origi
     await assert.rejects(deliveryPlan(config, disagreement, release, null, options, fetcher), /legacy partial.*lacks original/);
     tarballs.set(packages[1].dist.tarball, Buffer.from('tampered'));
     await assert.rejects(deliveryPlan(config, packages, release, null, options, fetcher), /integrity mismatch/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// Version manifests: one fixture tree in the anymd shape (workspace + lock, npm platform packages, aliases, server.json, CITATION.cff, independent forks).
+const descriptor = {
+  source: { file: 'packages/anymd/package.json', kind: 'json', fields: ['version'] },
+  product: [
+    { file: 'packages/anymd/package.json', kind: 'json', fields: ['version'] },
+    { file: 'packages/npm/*/package.json', kind: 'json', fields: ['version'] },
+    { file: 'packages/aliases/*/package.json', kind: 'json', fields: ['version'] },
+    { file: 'server.json', kind: 'json', fields: ['version', 'packages.*.version'] },
+    { file: 'Cargo.toml', kind: 'toml', fields: ['workspace.package.version'] },
+    { file: 'Cargo.lock', kind: 'cargo-lock', packages: ['anymd', 'anymd-core'] },
+    { file: 'CITATION.cff', kind: 'regex', pattern: '^version: (\\S+)$' },
+  ],
+  pins: [
+    { file: 'packages/anymd/package.json', kind: 'json', fields: ['optionalDependencies.*'] },
+    { file: 'packages/aliases/*/package.json', kind: 'json', fields: [['dependencies', '@sylphx/anymd']] },
+    { file: 'Cargo.toml', kind: 'toml', fields: ['workspace.dependencies.anymd.version', 'workspace.dependencies.anymd-core.version'] },
+  ],
+  independent: [
+    { file: 'Cargo.toml', kind: 'toml', fields: ['workspace.dependencies.anymd-pdf-extract.version'], expect: '0.12.2' },
+    { file: 'Cargo.lock', kind: 'cargo-lock', packages: ['anymd-oar-ocr-vl'], expect: undefined },
+  ],
+};
+const CARGO = `# workspace root
+[workspace.package]
+version = "1.0.0" # product version
+edition = "2021"
+
+[workspace.dependencies]
+anymd = { path = "crates/anymd", version = "1.0.0" }
+anymd-core = { path = "crates/core", version = "1.0.0" } # pin
+anymd-pdf-extract = { path = "forks/pdf", version = "0.12.2" }
+serde = { version = "1.0.0" }
+`;
+const LOCK = `# generated
+version = 4
+
+[[package]]
+name = "anymd"
+version = "1.0.0"
+dependencies = ["anymd-core"]
+
+[[package]]
+name = "anymd-core"
+version = "1.0.0"
+
+[[package]]
+name = "anymd-oar-ocr-vl"
+version = "0.9.2"
+
+[[package]]
+name = "serde"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+`;
+const pkg = (o) => `${JSON.stringify(o, null, 2)}\n`;
+function versionTree(over = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'kit-version-'));
+  const put = (path, text) => { mkdirSync(join(root, path, '..'), { recursive: true }); writeFileSync(join(root, path), text); };
+  put('packages/anymd/package.json', pkg({ name: '@sylphx/anymd', version: '1.0.0', optionalDependencies: { '@sylphx/anymd-linux-x64-gnu': '1.0.0', '@sylphx/anymd-darwin-arm64': '1.0.0' } }));
+  put('packages/npm/linux/package.json', pkg({ name: '@sylphx/anymd-linux-x64-gnu', version: '1.0.0' }));
+  put('packages/npm/darwin/package.json', pkg({ name: '@sylphx/anymd-darwin-arm64', version: '1.0.0' }));
+  put('packages/aliases/alias/package.json', pkg({ name: 'anymd-cli', version: '1.0.0', dependencies: { '@sylphx/anymd': '1.0.0', other: '9.9.9' } }));
+  put('server.json', pkg({ name: 'x', version: '1.0.0', packages: [{ version: '1.0.0' }] }));
+  put('Cargo.toml', over.cargo ?? CARGO);
+  put('Cargo.lock', over.lock ?? LOCK);
+  put('CITATION.cff', 'cff-version: 1.2.0\ntitle: anymd\nversion: 1.0.0\n');
+  return root;
+}
+const snapshot = (root, ...files) => files.map((f) => readFileSync(join(root, f), 'utf8'));
+
+test('version check passes on a consistent tree and set rewrites every shape', () => {
+  const root = versionTree();
+  try {
+    assert.deepEqual(versionCheck(descriptor, root).problems, []);
+    const changed = versionSet(descriptor, '1.2.3', root);
+    assert.ok(changed.includes('Cargo.lock') && changed.includes('CITATION.cff') && changed.includes('packages/aliases/alias/package.json'));
+    assert.deepEqual(versionCheck(descriptor, root), { want: '1.2.3', problems: [] });
+    const cargo = readFileSync(join(root, 'Cargo.toml'), 'utf8');
+    assert.equal(cargo, CARGO.replace('version = "1.0.0" # product', 'version = "1.2.3" # product').replace(/(anymd(?:-core)? = \{[^}]*version = ")1\.0\.0/g, '$11.2.3'));
+    assert.match(cargo, /# workspace root/);
+    assert.match(cargo, /serde = \{ version = "1\.0\.0" \}/);
+    const alias = JSON.parse(readFileSync(join(root, 'packages/aliases/alias/package.json'), 'utf8'));
+    assert.deepEqual(alias.dependencies, { '@sylphx/anymd': '1.2.3', other: '9.9.9' });
+    assert.ok(readFileSync(join(root, 'server.json'), 'utf8').endsWith('}\n'));
+    assert.match(readFileSync(join(root, 'server.json'), 'utf8'), /\n  "version": "1\.2\.3"/);
+    assert.equal(readFileSync(join(root, 'CITATION.cff'), 'utf8'), 'cff-version: 1.2.0\ntitle: anymd\nversion: 1.2.3\n');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('version set leaves independent fork versions and registry packages unchanged', () => {
+  const root = versionTree();
+  try {
+    versionSet(descriptor, '2.0.0', root);
+    const cargo = readFileSync(join(root, 'Cargo.toml'), 'utf8');
+    assert.match(cargo, /anymd-pdf-extract = \{ path = "forks\/pdf", version = "0\.12\.2" \}/);
+    const lock = readFileSync(join(root, 'Cargo.lock'), 'utf8');
+    assert.match(lock, /name = "anymd-oar-ocr-vl"\nversion = "0\.9\.2"/);
+    assert.match(lock, /name = "serde"\nversion = "1\.0\.0"/);
+    assert.match(lock, /name = "anymd"\nversion = "2\.0\.0"/);
+    assert.deepEqual(versionCheck(descriptor, root).problems, []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('version set refuses when a product location overlaps an independent one', () => {
+  const root = versionTree();
+  try {
+    const overlap = { ...descriptor, independent: [{ file: 'Cargo.toml', kind: 'toml', fields: ['workspace.dependencies.anymd.version'] }] };
+    assert.throws(() => versionSet(overlap, '2.0.0', root), /independent version changed/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('version check names the file and field of a drifted pin', () => {
+  const root = versionTree({ cargo: CARGO.replace('anymd-core = { path = "crates/core", version = "1.0.0" }', 'anymd-core = { path = "crates/core", version = "0.9.0" }') });
+  try {
+    const { problems } = versionCheck(descriptor, root);
+    assert.deepEqual(problems, ['Cargo.toml workspace.dependencies.anymd-core.version: 0.9.0, want 1.0.0']);
+    writeFileSync(join(root, 'packages/npm/linux/package.json'), pkg({ name: 'x', version: '0.8.0' }));
+    assert.ok(versionCheck(descriptor, root).problems.includes('packages/npm/linux/package.json version: 0.8.0, want 1.0.0'));
+    assert.deepEqual(versionCheck(descriptor, root, '1.0.0').want, '1.0.0');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('version check flags an independent fork that left its expected version', () => {
+  const root = versionTree({ cargo: CARGO.replace('0.12.2', '1.0.0') });
+  try {
+    assert.deepEqual(versionCheck(descriptor, root).problems, ['Cargo.toml workspace.dependencies.anymd-pdf-extract.version: independent version is 1.0.0, expected 0.12.2']);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('version set is idempotent and touches no file when already current', () => {
+  const root = versionTree();
+  const files = ['Cargo.toml', 'Cargo.lock', 'server.json', 'CITATION.cff', 'packages/anymd/package.json'];
+  try {
+    versionSet(descriptor, '3.1.4', root);
+    const first = snapshot(root, ...files);
+    assert.deepEqual(versionSet(descriptor, '3.1.4', root), []);
+    assert.deepEqual(snapshot(root, ...files), first);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('version descriptor errors name the file and what is missing', () => {
+  const root = versionTree();
+  try {
+    const gone = { ...descriptor, product: [{ file: 'server.json', kind: 'json', fields: ['nope'] }] };
+    assert.throws(() => versionCheck(gone, root), /server\.json: field nope not found/);
+    const nofile = { ...descriptor, product: [{ file: 'missing/*.json', kind: 'json', fields: ['version'] }] };
+    assert.throws(() => versionCheck(nofile, root), /missing\/\*\.json: no file matches/);
+    const nolock = { ...descriptor, product: [{ file: 'Cargo.lock', kind: 'cargo-lock', packages: ['serde'] }] };
+    assert.throws(() => versionCheck(nolock, root), /workspace package serde not found/);
+    assert.throws(() => versionSet(descriptor, 'v1', root), /X\.Y\.Z/);
+    writeFileSync(join(root, 'd.json'), JSON.stringify({ source: descriptor.source }));
+    assert.throws(() => readDescriptor(join(root, 'd.json')), /at least one of product, pins/);
+    assert.deepEqual(expandFiles(root, 'packages/npm/*/package.json'), ['packages/npm/darwin/package.json', 'packages/npm/linux/package.json']);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('version CLI sets and checks through the descriptor file', () => {
+  const root = versionTree();
+  const run = (...a) => execFileSync(process.execPath, [join(import.meta.dirname, 'release.mjs'), 'version', ...a], { cwd: root, encoding: 'utf8' });
+  try {
+    writeFileSync(join(root, 'version-manifests.json'), JSON.stringify(descriptor));
+    assert.match(run('check'), /at 1\.0\.0/);
+    assert.match(run('set', '1.1.0'), /set 1\.1\.0/);
+    assert.match(run('check'), /at 1\.1\.0/);
+    assert.match(run('set', '1.1.0'), /already at 1\.1\.0/);
+    assert.throws(() => run('check', '9.9.9', '--descriptor', 'version-manifests.json'), /version drift/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

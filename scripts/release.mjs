@@ -322,6 +322,217 @@ async function wait(probe) {
   }
   throw new Error('publication not visible after 10 minutes');
 }
+// Descriptor-driven version manifests (offline): `version set <X.Y.Z>` and `version check`.
+// A descriptor lists every location that carries the product version; see README "Version manifests".
+const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+const KINDS = ['json', 'toml', 'cargo-lock', 'regex'];
+
+// A file pattern may use `*` inside one path segment (packages/npm/*/package.json).
+export function expandFiles(root, pattern) {
+  let paths = [''];
+  for (const part of pattern.split('/')) {
+    if (!part.includes('*')) { paths = paths.map((p) => (p ? `${p}/${part}` : part)); continue; }
+    const re = new RegExp(`^${part.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*')}$`);
+    paths = paths.flatMap((p) => {
+      try { return readdirSync(join(root, p)).filter((n) => re.test(n)).sort().map((n) => (p ? `${p}/${n}` : n)); } catch { return []; }
+    });
+  }
+  return paths;
+}
+
+const segments = (field) => (Array.isArray(field) ? field : String(field).split('.'));
+
+function jsonFind(text, loc, file) {
+  const data = JSON.parse(text);
+  const indent = /^\n?([ \t]+)\S/m.exec(text)?.[1] ?? '  ';
+  const entries = [];
+  const walk = (node, rest, trail) => {
+    if (!rest.length) { entries.push({ label: trail.join('.'), value: node, set: null }); return; }
+    const [head, ...tail] = rest;
+    if (node === null || typeof node !== 'object') return;
+    for (const key of head === '*' ? Object.keys(node) : Object.hasOwn(node, head) ? [head] : []) {
+      if (tail.length) walk(node[key], tail, [...trail, key]);
+      else entries.push({ label: [...trail, key].join('.'), value: node[key], set: (v) => { node[key] = v; } });
+    }
+  };
+  for (const field of loc.fields) {
+    const before = entries.length;
+    walk(data, segments(field), []);
+    if (entries.length === before) throw new Error(`${file}: field ${segments(field).join('.')} not found`);
+  }
+  return { entries, render: () => `${JSON.stringify(data, null, indent)}${text.endsWith('\n') ? '\n' : ''}` };
+}
+
+const unquote = (k) => (k.startsWith('"') || k.startsWith("'") ? k.slice(1, -1) : k);
+function tomlSpans(text) {
+  // String values of `key = "x"` lines and of fields inside single-line inline tables, with their table path.
+  const spans = [];
+  let table = [];
+  let offset = 0;
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const head = /^\s*\[(?!\[)([^\]]+)\]\s*(?:#.*)?$/.exec(line);
+    if (head) table = head[1].split('.').map((s) => unquote(s.trim()));
+    else if (/^\s*\[\[/.test(line)) table = ['[[array]]'];
+    else {
+      const key = /^(\s*)("[^"]+"|'[^']+'|[A-Za-z0-9_-]+)\s*=\s*/.exec(line);
+      if (key) {
+        const name = unquote(key[2]);
+        const value = line.slice(key[0].length);
+        const str = /^"((?:[^"\\]|\\.)*)"/.exec(value);
+        const at = offset + key[0].length;
+        if (str) spans.push({ path: [...table, name], start: at + 1, end: at + 1 + str[1].length, value: str[1] });
+        else if (value.startsWith('{')) {
+          for (const m of value.matchAll(/([{,]\s*)("[^"]+"|[A-Za-z0-9_-]+)\s*=\s*"((?:[^"\\]|\\.)*)"/g)) {
+            const start = at + m.index + m[0].length - m[3].length - 1;
+            spans.push({ path: [...table, name, unquote(m[2])], start, end: start + m[3].length, value: m[3] });
+          }
+        }
+      }
+    }
+    offset += raw.length + 1;
+  }
+  return spans;
+}
+
+function splice(text, spans, v) {
+  let out = text;
+  for (const s of [...spans].sort((a, b) => b.start - a.start)) out = out.slice(0, s.start) + v + out.slice(s.end);
+  return out;
+}
+
+function tomlFind(text, loc, file) {
+  const all = tomlSpans(text);
+  const spans = [];
+  for (const field of loc.fields) {
+    const want = segments(field).join('\0');
+    const hits = all.filter((s) => s.path.join('\0') === want);
+    if (!hits.length) throw new Error(`${file}: field ${segments(field).join('.')} not found`);
+    spans.push(...hits.map((s) => ({ ...s, label: segments(field).join('.') })));
+  }
+  return { entries: spans.map((s) => ({ label: s.label, value: s.value })), render: (v) => splice(text, spans, v) };
+}
+
+function lockFind(text, loc, file) {
+  // Only workspace members (no `source`) of the listed names: registry crates and forks stay untouched.
+  const spans = [];
+  const blocks = [...text.matchAll(/^\[\[package\]\]\r?\n(?:(?!\[\[)[^\n]*\n?)*/gm)];
+  for (const name of loc.packages) {
+    const before = spans.length;
+    for (const b of blocks) {
+      if (new RegExp(`^name = "${name.replace(/[.+?^${}()|[\]\\]/g, '\\$&')}"\\r?$`, 'm').exec(b[0]) === null || /^source = /m.test(b[0])) continue;
+      const m = /^version = "([^"]*)"/m.exec(b[0]);
+      if (m) spans.push({ label: `package ${name}`, start: b.index + m.index + 11, end: b.index + m.index + 11 + m[1].length, value: m[1] });
+    }
+    if (spans.length === before) throw new Error(`${file}: workspace package ${name} not found`);
+  }
+  return { entries: spans.map((s) => ({ label: s.label, value: s.value })), render: (v) => splice(text, spans, v) };
+}
+
+function regexFind(text, loc, file) {
+  if (new RegExp(`${loc.pattern}|`).exec('').length !== 2) throw new Error(`${file}: pattern needs exactly one capture group`);
+  const re = new RegExp(loc.pattern, 'gm');
+  const spans = [...text.matchAll(re)].map((m) => {
+    const start = m.index + m[0].lastIndexOf(m[1]);
+    return { label: `/${loc.pattern}/`, start, end: start + m[1].length, value: m[1] };
+  });
+  if (!spans.length) throw new Error(`${file}: pattern /${loc.pattern}/ not found`);
+  return { entries: spans.map((s) => ({ label: s.label, value: s.value })), render: (v) => splice(text, spans, v) };
+}
+
+const FINDERS = { json: jsonFind, toml: tomlFind, 'cargo-lock': lockFind, regex: regexFind };
+
+export function readDescriptor(file) {
+  const d = json(file);
+  const sections = ['product', 'pins', 'independent'];
+  if (!d.source || !sections.some((s) => d[s]?.length)) throw new Error(`${file}: needs "source" and at least one of product, pins`);
+  for (const loc of [d.source, ...sections.flatMap((s) => d[s] ?? [])]) {
+    if (!loc.file || !KINDS.includes(loc.kind)) throw new Error(`${file}: each location needs "file" and "kind" (${KINDS.join(', ')})`);
+    if ((loc.kind === 'json' || loc.kind === 'toml') && !loc.fields?.length) throw new Error(`${file}: ${loc.file} needs "fields"`);
+    if (loc.kind === 'cargo-lock' && !loc.packages?.length) throw new Error(`${file}: ${loc.file} needs "packages"`);
+    if (loc.kind === 'regex' && !loc.pattern) throw new Error(`${file}: ${loc.file} needs "pattern"`);
+  }
+  return d;
+}
+
+// Every file a location lists, parsed once: [{ role, file, loc, found }].
+function resolveLocations(descriptor, root) {
+  const out = [];
+  for (const role of ['product', 'pins', 'independent']) {
+    for (const loc of descriptor[role] ?? []) {
+      const files = expandFiles(root, loc.file);
+      if (!files.length) throw new Error(`${loc.file}: no file matches (${role})`);
+      for (const file of files) out.push({ role, file, loc, found: FINDERS[loc.kind](readFileSync(join(root, file), 'utf8'), loc, file) });
+    }
+  }
+  return out;
+}
+
+function sourceVersion(descriptor, root) {
+  const files = expandFiles(root, descriptor.source.file);
+  if (files.length !== 1) throw new Error(`source ${descriptor.source.file} must match exactly one file`);
+  const { entries } = FINDERS[descriptor.source.kind](readFileSync(join(root, files[0]), 'utf8'), descriptor.source, files[0]);
+  const values = new Set(entries.map((e) => e.value));
+  if (values.size !== 1) throw new Error(`source ${files[0]} must carry exactly one value`);
+  return [...values][0];
+}
+
+// Fails (returns problems) when any listed location disagrees with the source, or an independent one is absent or off its `expect`.
+export function versionCheck(descriptor, root = '.', want = sourceVersion(descriptor, root)) {
+  const problems = [];
+  for (const { role, file, loc, found } of resolveLocations(descriptor, root)) {
+    for (const e of found.entries) {
+      if (role === 'independent') {
+        if (loc.expect !== undefined && e.value !== loc.expect) problems.push(`${file} ${e.label}: independent version is ${e.value}, expected ${loc.expect}`);
+      } else if (e.value !== want) problems.push(`${file} ${e.label}: ${e.value}, want ${want}`);
+    }
+  }
+  return { want, problems };
+}
+
+// Rewrites product and pin locations to `v`; independent locations are read before and after and must not move.
+export function versionSet(descriptor, v, root = '.') {
+  if (!SEMVER.test(v)) throw new Error('version must look like X.Y.Z or X.Y.Z-pre');
+  const before = resolveLocations(descriptor, root);
+  const guarded = new Map();
+  for (const r of before) if (r.role === 'independent') guarded.set(r.file, r.found.entries.map((e) => `${e.label}=${e.value}`).join('\n'));
+  const changed = [];
+  const writes = new Map();
+  for (const r of before) {
+    if (r.role === 'independent') continue;
+    const file = join(root, r.file);
+    // Each location edits the freshest text of its file, so two locations in one file compose.
+    const text = writes.get(r.file) ?? readFileSync(file, 'utf8');
+    const found = FINDERS[r.loc.kind](text, r.loc, r.file);
+    if (r.loc.kind === 'json') { for (const e of found.entries) e.set(v); writes.set(r.file, found.render()); } else writes.set(r.file, found.render(v));
+  }
+  for (const [path, text] of writes) {
+    if (readFileSync(join(root, path), 'utf8') !== text) { writeFileSync(join(root, path), text); changed.push(path); }
+  }
+  for (const r of resolveLocations(descriptor, root)) {
+    if (r.role === 'independent' && r.found.entries.map((e) => `${e.label}=${e.value}`).join('\n') !== guarded.get(r.file)) {
+      throw new Error(`${r.file}: independent version changed; fix the descriptor so no product location overlaps it`);
+    }
+  }
+  return changed;
+}
+
+function versionCommand(args) {
+  const [sub, ...rest] = args;
+  const flag = rest.indexOf('--descriptor');
+  const file = flag >= 0 ? rest.splice(flag, 2)[1] : 'version-manifests.json';
+  const descriptor = readDescriptor(file);
+  if (sub === 'set') {
+    if (!SEMVER.test(rest[0] ?? '')) throw new Error('usage: release.mjs version set <X.Y.Z> [--descriptor FILE]');
+    const changed = versionSet(descriptor, rest[0]);
+    console.log(changed.length ? `set ${rest[0]}; changed:\n  ${changed.join('\n  ')}` : `already at ${rest[0]}`);
+  } else {
+    const { want, problems } = versionCheck(descriptor, '.', rest[0]);
+    if (problems.length) throw new Error(`version drift (want ${want}):\n  ${problems.join('\n  ')}`);
+    console.log(`every listed location is at ${want}`);
+  }
+}
+
 const output = (name, value) => {
   const text = `${name}=${value}\n`;
   if (process.env.GITHUB_OUTPUT) writeFileSync(process.env.GITHUB_OUTPUT, text, { flag: 'a' });
@@ -330,6 +541,7 @@ const output = (name, value) => {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
+  if (command === 'version' && (args[0] === 'set' || args[0] === 'check')) return versionCommand(args);
   if (command === 'probe' || command === 'wait' || command === 'require') {
     const [kind, name, version] = args;
     const probes = { npm, registry, crate, github, image };

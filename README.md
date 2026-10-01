@@ -193,6 +193,43 @@ The manifest comes from `server.json` (title, description, website, arguments) a
 
 `mcpb-icon` points at a 512×512 PNG. `scripts/mcpb.mjs` builds the bundles with the official `mcpb` CLI; `scripts/mcpb.test.mjs` checks them.
 
+## Version manifests
+
+`node .mcp-kit/scripts/release.mjs version check` and `version set <X.Y.Z>`
+keep one product version identical across every manifest a release reads.
+Both are offline and read a JSON descriptor (default `version-manifests.json`,
+or `--descriptor FILE`) that lists where the version lives:
+
+```json
+{
+  "source": { "file": "packages/anymd/package.json", "kind": "json", "fields": ["version"] },
+  "product": [
+    { "file": "packages/anymd/package.json", "kind": "json", "fields": ["version"] },
+    { "file": "packages/npm/*/package.json", "kind": "json", "fields": ["version"] },
+    { "file": "server.json", "kind": "json", "fields": ["version", "packages.*.version"] },
+    { "file": "Cargo.toml", "kind": "toml", "fields": ["workspace.package.version"] },
+    { "file": "Cargo.lock", "kind": "cargo-lock", "packages": ["anymd", "anymd-core"] },
+    { "file": "CITATION.cff", "kind": "regex", "pattern": "^version: (\\S+)$" }
+  ],
+  "pins": [
+    { "file": "packages/anymd/package.json", "kind": "json", "fields": ["optionalDependencies.*"] },
+    { "file": "packages/aliases/*/package.json", "kind": "json", "fields": [["dependencies", "@sylphx/anymd"]] },
+    { "file": "Cargo.toml", "kind": "toml", "fields": ["workspace.dependencies.anymd-core.version"] }
+  ],
+  "independent": [
+    { "file": "Cargo.toml", "kind": "toml", "fields": ["workspace.dependencies.anymd-pdf-extract.version"], "expect": "0.12.2" }
+  ]
+}
+```
+
+- `source` is the one place `check` reads the wanted version from (or pass it: `check X.Y.Z`).
+- `product` and `pins` locations must all equal it; `set` rewrites them. They differ only in intent: `pins` are dependency pins.
+- `independent` locations (vendored forks) are never written. `check` fails if one leaves its optional `expect`, and `set` fails if a product location overlaps one.
+- Kinds: `json` (`fields` are dotted paths; `*` matches every key or item; an array gives exact segments for keys that contain dots), `toml` (dotted table path, including fields of single-line inline tables), `cargo-lock` (workspace packages by name; registry crates are never touched), `regex` (one capture group around the version).
+- A `file` may use `*` inside one path segment. A listed file, field or package that is missing is an error that names it.
+- Formatting is kept: JSON keeps its indent and trailing newline, TOML and `Cargo.lock` keep comments and layout, and a file already current is not rewritten.
+- `check` exits 1 listing each drift as `file field: found, want X`.
+
 ## Releasing the kit
 
 Bump `version` in `Cargo.toml` and merge. `publish.yml` publishes the crate to crates.io, tags `vX.Y.Z` and moves `v0`, which the servers' release workflows use. A change to the release workflow reaches the servers only with a version bump.
