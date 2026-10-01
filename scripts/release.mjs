@@ -60,30 +60,71 @@ export async function github(repo, version, fetcher = fetch) {
   return value;
 }
 
-export async function image(name, version, fetcher = fetch) {
+export async function image(name, version, fetcher = fetch, canonical, natives = {}) {
   if (!name) return null;
-  if (!name.startsWith('ghcr.io/')) throw new Error('docker-image must name a GHCR image');
+  if (!name.startsWith('ghcr.io/') || !canonical) throw new Error('GHCR requires canonical release identity');
   const repository = name.slice('ghcr.io/'.length);
-  // GHCR's documented anonymous pull token, not a swallowed authentication failure.
-  const tokenResponse = await request(`https://ghcr.io/token?service=ghcr.io&scope=${encode(`repository:${repository}:pull`)}`, {}, fetcher);
+  // Authorized package metadata positively distinguishes a first publication
+  // from an anonymous token denial. No non-404 is treated as absence.
+  const [owner, ...path] = repository.split('/');
+  const ownerResponse = await request(`https://api.github.com/users/${owner}`, githubHeaders(), fetcher);
+  if (!ownerResponse) throw new Error('GHCR owner is absent');
+  const ownerKind = (await ownerResponse.json()).type;
+  if (!['Organization', 'User'].includes(ownerKind)) throw new Error('GHCR owner identity is invalid');
+  const metadata = await request(`https://api.github.com/${ownerKind === 'Organization' ? 'orgs' : 'users'}/${owner}/packages/container/${encode(path.join('/'))}`, githubHeaders(), fetcher);
+  if (!metadata) return null;
+  const tokenResponse = await request(`https://ghcr.io/token?service=ghcr.io&scope=${encode(`repository:${repository}:pull`)}`, {
+    Authorization: `Basic ${Buffer.from(`${process.env.GITHUB_ACTOR}:${process.env.GH_TOKEN}`).toString('base64')}`,
+  }, fetcher);
   if (!tokenResponse) throw new Error('GHCR token endpoint is absent');
   const { token } = await tokenResponse.json();
   if (!token) throw new Error('GHCR did not provide a pull token');
-  const response = await request(`https://ghcr.io/v2/${repository}/manifests/${encode(version)}`, {
-    Authorization: `Bearer ${token}`,
-    Accept: 'application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json',
-  }, fetcher);
-  if (!response) return null;
-  const bytes = Buffer.from(await response.arrayBuffer());
-  const digest = `sha256:${hash(bytes).toString('hex')}`;
-  if (response.headers.get('docker-content-digest') !== digest) throw new Error('GHCR manifest digest mismatch');
-  const value = JSON.parse(bytes);
+  const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' };
+  const load = async (path, expected) => {
+    const response = await request(`https://ghcr.io/v2/${repository}/${path}`, headers, fetcher);
+    if (!response) return null;
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const digest = `sha256:${hash(bytes).toString('hex')}`;
+    if ((expected && digest !== expected) || (!expected && response.headers.get('docker-content-digest') !== digest)) throw new Error('GHCR content digest mismatch');
+    return { value: JSON.parse(bytes), digest };
+  };
+  const index = await load(`manifests/${encode(version)}`);
+  if (!index) return null;
   for (const arch of ['amd64', 'arm64']) {
-    if (!value.manifests?.some((m) => m.platform?.os === 'linux' && m.platform?.architecture === arch && /^sha256:[a-f0-9]{64}$/.test(m.digest))) {
-      throw new Error(`GHCR image lacks linux/${arch}`);
-    }
+    const descriptor = index.value.manifests?.find((m) => m.platform?.os === 'linux' && m.platform?.architecture === arch);
+    if (!descriptor || !/^sha256:[a-f0-9]{64}$/.test(descriptor.digest)) throw new Error(`GHCR image lacks linux/${arch}`);
+    const child = await load(`manifests/${descriptor.digest}`, descriptor.digest);
+    if (!child || !/^sha256:[a-f0-9]{64}$/.test(child.value.config?.digest)) throw new Error('GHCR child manifest missing');
+    const config = await load(`blobs/${child.value.config.digest}`, child.value.config.digest);
+    const labels = config?.value.config?.Labels;
+    const key = arch === 'amd64' ? 'linux-x64-gnu' : 'linux-arm64-gnu';
+    if (config?.value.os !== 'linux' || config.value.architecture !== arch || labels?.['org.opencontainers.image.version'] !== version || labels?.['org.opencontainers.image.revision'] !== canonical.commit || labels?.['org.opencontainers.image.source'] !== `https://github.com/${canonical.repository}` || labels?.[`io.sylphx.native.${key}.sha256`] !== natives[key]?.sha256 || !natives[key]) throw new Error('GHCR image identity mismatch');
   }
-  return { digest };
+  return { digest: index.digest };
+}
+
+export function sourceIdentity(source) {
+  if (!source || !/^[a-f0-9]{40}$/.test(source.commit) || !/^[^/]+\/[^/]+$/.test(source.repository)) throw new Error('invalid canonical source identity');
+  return source;
+}
+export function sameSource(a, b) {
+  sourceIdentity(a); sourceIdentity(b);
+  if (a.commit !== b.commit || a.repository !== b.repository) throw new Error('mixed canonical sources');
+}
+export function canonicalSource(sources, fallback) {
+  const canonical = sourceIdentity(sources[0] || fallback);
+  for (const source of sources) sameSource(source, canonical);
+  return canonical;
+}
+async function sidecar(release, name, key, fetcher) {
+  const asset = release?.assets.find((a) => a.name === `${name}-${key}.identity.json`);
+  if (!asset) return null;
+  if (!/^sha256:[a-f0-9]{64}$/.test(asset.digest)) throw new Error('original identity asset lacks verified digest');
+  const response = await request(asset.url, { ...githubHeaders(), Accept: 'application/octet-stream' }, fetcher);
+  if (!response) throw new Error('original identity asset disappeared');
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (`sha256:${hash(bytes).toString('hex')}` !== asset.digest) throw new Error('identity asset digest mismatch');
+  return JSON.parse(bytes);
 }
 
 export function manifests(env = process.env, root = '.') {
@@ -118,7 +159,7 @@ export function cargoIdentity(metadata, cargo, version) {
 }
 
 export function requiredAssets(name, version, bundles) {
-  return [...KEYS.map((key) => archive(name, key)), ...(bundles ? [`${name}-${version}.mcpb`, ...KEYS.map((key) => `${name}-${version}-${key}.mcpb`)] : [])];
+  return [...KEYS.flatMap((key) => [archive(name, key), `${name}-${key}.identity.json`]), ...(bundles ? [`${name}-${version}.mcpb`, ...KEYS.map((key) => `${name}-${version}-${key}.mcpb`)] : [])];
 }
 
 export function completion(packages, release, mcp, docker, wantedAssets, wantsDocker) {
@@ -140,10 +181,12 @@ export function verifyIntegrity(bytes, integrity) {
 }
 
 export function nativeIdentity(name, version, key, bytes, source) {
-  if (!KEYS.includes(key) || !bytes.length || !source) throw new Error('invalid native identity');
+  sourceIdentity(source);
+  if (!KEYS.includes(key) || !bytes.length) throw new Error('invalid native identity');
   return { name, version, platform: key, sha256: hash(bytes).toString('hex'), source };
 }
-export function verifyNative(identity, name, version, key, bytes) {
+export function verifyNative(identity, name, version, key, bytes, canonical = identity.source) {
+  sameSource(identity.source, canonical);
   if (identity.name !== name || identity.version !== version || identity.platform !== key || !identity.source || identity.sha256 !== hash(bytes).toString('hex')) {
     throw new Error(`native identity mismatch for ${key}`);
   }
@@ -156,11 +199,16 @@ export async function recover(config, key, out, fetcher = fetch) {
   const pkg = config.packages.find((p) => p.key === key);
   const published = await npm(pkg.name, config.version, fetcher);
   const release = await github(process.env.GITHUB_REPOSITORY, config.version, fetcher);
-  const asset = release?.assets.find((a) => a.name === archive(config.name, key) && /^sha256:[a-f0-9]{64}$/.test(a.digest));
-  if (!published && !asset) return false;
+  const original = await sidecar(release, config.name, key, fetcher);
+  const asset = original && release?.assets.find((a) => a.name === archive(config.name, key) && /^sha256:[a-f0-9]{64}$/.test(a.digest));
+  if (!published && !asset) {
+    if (release?.assets.some((a) => a.name === archive(config.name, key))) throw new Error('legacy release binary lacks verified original identity; migration required');
+    return false;
+  }
   const temporary = mkdtempSync(join(tmpdir(), 'release-native-'));
   try {
-    let bytes, source;
+    let bytes, identity;
+    const canonical = sourceIdentity(config.source || { repository: process.env.GITHUB_REPOSITORY, commit: process.env.CANONICAL_SHA });
     if (asset) {
       const response = await request(asset.url, { ...githubHeaders(), Accept: 'application/octet-stream' }, fetcher);
       if (!response) throw new Error('GitHub recovery asset disappeared');
@@ -171,7 +219,8 @@ export async function recover(config, key, out, fetcher = fetch) {
       bytes = key.startsWith('win32')
         ? execFileSync('unzip', ['-p', file, binary(config.name, key)], { maxBuffer: 512 * 1024 * 1024 })
         : execFileSync('tar', ['-xOzf', file, binary(config.name, key)], { maxBuffer: 512 * 1024 * 1024 });
-      source = { release: release.tag_name, digest: asset.digest };
+      identity = original;
+      if (!identity) throw new Error('legacy GitHub binary lacks original verified build identity; recover from proven npm package instead');
     } else {
       const response = await request(published.dist.tarball, {}, fetcher);
       if (!response) throw new Error('npm recovery tarball disappeared');
@@ -182,11 +231,16 @@ export async function recover(config, key, out, fetcher = fetch) {
       const manifest = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/package.json'], { encoding: 'utf8' }));
       if (manifest.name !== pkg.name || manifest.version !== config.version) throw new Error('recovered npm manifest identity mismatch');
       bytes = execFileSync('tar', ['-xOzf', file, `package/${binary(config.name, key)}`], { maxBuffer: 512 * 1024 * 1024 });
-      source = { npm: pkg.name, integrity: published.dist.integrity };
+      // Preserve original identity carried in the signed package, never label
+      // downloaded bytes with a requested version or current checkout.
+      try { identity = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/identity.json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })); }
+      catch { throw new Error('legacy npm binary lacks original build identity; verified provenance migration required'); }
+      if (published.gitHead !== identity.source?.commit) throw new Error('npm gitHead differs from original build source');
     }
+    verifyNative(identity, config.name, config.version, key, bytes, canonical);
     mkdirSync(out, { recursive: true });
     writeFileSync(join(out, binary(config.name, key)), bytes, { mode: 0o755 });
-    writeFileSync(join(out, 'identity.json'), JSON.stringify(nativeIdentity(config.name, config.version, key, bytes, source)));
+    writeFileSync(join(out, 'identity.json'), JSON.stringify(identity));
     return true;
   } finally { rmSync(temporary, { recursive: true, force: true }); }
 }
@@ -210,7 +264,8 @@ async function main() {
     const [kind, name, version] = args;
     const probes = { npm, registry, crate, github, image };
     if (!probes[kind]) throw new Error('unknown publication kind');
-    const probe = () => probes[kind](name, version);
+    const nativeIdentities = kind === 'image' ? Object.fromEntries(['linux-x64-gnu', 'linux-arm64-gnu'].map((key) => [key, json(join('artifacts', `native-${key}`, 'identity.json'))])) : {};
+    const probe = () => probes[kind](name, version, fetch, { repository: process.env.GITHUB_REPOSITORY, commit: process.env.CANONICAL_SHA }, nativeIdentities);
     if (command === 'wait') await wait(probe);
     else {
       const value = await probe();
@@ -231,25 +286,48 @@ async function main() {
     for (const pkg of config.packages) packages.push(await npm(pkg.name, config.version));
     const release = await github(process.env.GITHUB_REPOSITORY, config.version);
     const mcp = await registry(process.env.MCP_NAME, config.version);
-    const docker = await image(process.env.IMAGE || '', config.version);
+    const sources = [], nativeIdentities = {};
+    for (const key of KEYS) {
+      const identity = await sidecar(release, config.name, key, fetch);
+      if (identity) {
+        if (identity.name !== config.name || identity.version !== config.version || identity.platform !== key || !/^[a-f0-9]{64}$/.test(identity.sha256)) throw new Error('original platform identity mismatch');
+        sources.push(identity.source); nativeIdentities[key] = identity;
+      }
+      const published = packages[KEYS.indexOf(key)];
+      if (published) {
+        if (!/^[a-f0-9]{40}$/.test(published.gitHead)) throw new Error('published native lacks canonical source; verified provenance migration required');
+        sources.push({ repository: process.env.GITHUB_REPOSITORY, commit: published.gitHead });
+      }
+    }
+    const canonical = canonicalSource(sources, { repository: process.env.GITHUB_REPOSITORY, commit: process.env.GITHUB_SHA });
+    output('canonical', canonical.commit);
+    const docker = await image(process.env.IMAGE || '', config.version, fetch, canonical, nativeIdentities);
     const done = completion(packages, release, mcp, docker, requiredAssets(config.name, config.version, process.env.MCPB === 'true'), Boolean(process.env.IMAGE));
     output('version', config.version); output('dir', config.dir); output('cargo', config.cargo); output('publish', done.publish);
     for (const channel of ['npm', 'github', 'registry', 'docker']) output(`${channel}-missing`, !done[channel]);
     console.log(`release ${config.version}: ${JSON.stringify(done)}`);
   } else if (command === 'recover') {
     output('recovered', await recover(config, args[0], 'out'));
+  } else if (command === 'cargo') {
+    cargoIdentity(JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], { encoding: 'utf8' })), config.cargo, config.version);
+    if (execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() !== process.env.CANONICAL_SHA) throw new Error('checkout differs from canonical source');
   } else if (command === 'identity') {
     const key = args[0], file = join('out', binary(config.name, key));
-    writeFileSync(join('out', 'identity.json'), JSON.stringify(nativeIdentity(config.name, config.version, key, readFileSync(file), { commit: process.env.GITHUB_SHA })));
+    writeFileSync(join('out', 'identity.json'), JSON.stringify(nativeIdentity(config.name, config.version, key, readFileSync(file), sourceIdentity({ repository: process.env.GITHUB_REPOSITORY, commit: process.env.CANONICAL_SHA }))));
   } else if (command === 'version') {
     verifyVersion(execFileSync(args[0], ['version'], { encoding: 'utf8' }), config.name, config.version);
   } else if (command === 'stage') {
     for (const key of args.length ? args : KEYS) {
       const source = join('artifacts', `native-${key}`), bytes = readFileSync(join(source, binary(config.name, key)));
-      verifyNative(json(join(source, 'identity.json')), config.name, config.version, key, bytes);
+      const identity = json(join(source, 'identity.json'));
+      verifyNative(identity, config.name, config.version, key, bytes, { repository: process.env.GITHUB_REPOSITORY, commit: process.env.CANONICAL_SHA });
       const destination = config.packages.find((p) => p.key === key).dir;
       copyFileSync(join(source, binary(config.name, key)), join(destination, binary(config.name, key)));
       chmodSync(join(destination, binary(config.name, key)), 0o755);
+      copyFileSync(join(source, 'identity.json'), join(destination, 'identity.json'));
+      const manifest = json(join(destination, 'package.json'));
+      if (manifest.files && !manifest.files.includes('identity.json')) manifest.files.push('identity.json');
+      writeFileSync(join(destination, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
     }
   } else if (command === 'assets') {
     const release = await github(process.env.GITHUB_REPOSITORY, config.version);

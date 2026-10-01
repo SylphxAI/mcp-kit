@@ -87,9 +87,13 @@ permissions:
 
 jobs:
   check:
+    permissions:
+      contents: read
+      packages: read
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      canonical: ${{ steps.v.outputs.canonical }}
       version: ${{ steps.v.outputs.version }}
       publish: ${{ steps.v.outputs.publish }}
       cargo: ${{ steps.v.outputs.cargo }}
@@ -126,6 +130,7 @@ jobs:
     if: needs.check.outputs.publish == 'true'
     name: build ${{ matrix.key }}
     env:
+      CANONICAL_SHA: ${{ needs.check.outputs.canonical }}
       GH_TOKEN: ${{ github.token }}
       NAME: ${{ inputs.name }}
       PKG: ${{ inputs.npm-package }}
@@ -178,6 +183,7 @@ jobs:
           BIN: ${{ inputs.name }}${{ matrix.exe }}
         run: |
           set -euo pipefail
+          node .mcp-kit/scripts/release.mjs cargo
           if [ -n "${{ matrix.zig }}" ]; then
             cargo zigbuild --release --locked -p "$CARGO_PKG" --target ${{ matrix.target }}.${{ matrix.zig }}
           else
@@ -185,6 +191,8 @@ jobs:
           fi
           mkdir -p out
           cp "target/${{ matrix.target }}/release/$BIN" out/
+          actual_source=$(git rev-parse HEAD)
+          test "$actual_source" = "$CANONICAL_SHA"
           node .mcp-kit/scripts/release.mjs identity "${{ matrix.key }}"
       - name: Run it (native targets)
         if: matrix.key != 'linux-arm64-gnu' && matrix.key != 'darwin-x64'
@@ -205,6 +213,7 @@ jobs:
       contents: write
       id-token: write
     env:
+      CANONICAL_SHA: ${{ needs.check.outputs.canonical }}
       GH_TOKEN: ${{ github.token }}
       MCP_NAME: ${{ inputs.mcp-name }}
       V: ${{ needs.check.outputs.version }}
@@ -292,7 +301,7 @@ jobs:
           done
           notes=$(awk -v v="## $V" '$0==v{f=1;next} /^## /{f=0} f' CHANGELOG.md 2>/dev/null || true)
           if [ "$present" = false ]; then
-            gh release create "v$V" assets/* --target "$GITHUB_SHA" --title "$NAME $V" --notes "${notes:-$NAME $V}"
+            gh release create "v$V" assets/* --target "$CANONICAL_SHA" --title "$NAME $V" --notes "${notes:-$NAME $V}"
           else
             # Keep delivered assets immutable; fill only the missing ones.
             node .mcp-kit/scripts/release.mjs assets assets/* > missing-assets
@@ -302,7 +311,7 @@ jobs:
         if: inputs.major-tag
         run: |
           set -euo pipefail
-          git tag -f "v${V%%.*}" "$GITHUB_SHA"
+          git tag -f "v${V%%.*}" "$CANONICAL_SHA"
           git push -f origin "refs/tags/v${V%%.*}"
       - name: Complete the MCP Registry entry
         if: needs.check.outputs.registry-missing == 'true'
@@ -326,6 +335,7 @@ jobs:
       contents: read
       packages: write
     env:
+      CANONICAL_SHA: ${{ needs.check.outputs.canonical }}
       GH_TOKEN: ${{ github.token }}
       MCP_NAME: ${{ inputs.mcp-name }}
       V: ${{ needs.check.outputs.version }}
@@ -355,6 +365,10 @@ jobs:
           cp "artifacts/native-linux-x64-gnu/$NAME" dist/amd64/
           cp "artifacts/native-linux-arm64-gnu/$NAME" dist/arm64/
           chmod +x dist/*/"$NAME"
+      - id: identity
+        run: |
+          echo "amd64=$(node -p "require('./artifacts/native-linux-x64-gnu/identity.json').sha256")" >> "$GITHUB_OUTPUT"
+          echo "arm64=$(node -p "require('./artifacts/native-linux-arm64-gnu/identity.json').sha256")" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -369,6 +383,12 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE }}:${{ env.V }},${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ env.V }}
+            org.opencontainers.image.revision=${{ needs.check.outputs.canonical }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            io.sylphx.native.linux-x64-gnu.sha256=${{ steps.identity.outputs.amd64 }}
+            io.sylphx.native.linux-arm64-gnu.sha256=${{ steps.identity.outputs.arm64 }}
       - name: Read back the image
         run: |
           set -euo pipefail
