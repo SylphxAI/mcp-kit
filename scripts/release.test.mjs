@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { KEYS, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, sameSource } from './release.mjs';
+import { KEYS, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, sameSource, deliveryPlan } from './release.mjs';
 
 const response = (status, value) => new Response(JSON.stringify(value), { status });
 const fixture = (value) => async () => response(200, value);
@@ -193,4 +193,86 @@ test('workflow keeps required build success and verifies replacement before reti
   assert.match(workflow, /run: node \.mcp-kit\/scripts\/release\.mjs recover/);
   assert.match(workflow, /stage linux-x64-gnu linux-arm64-gnu/);
   assert.doesNotMatch(workflow, /if ! npm view|if gh release view|find "artifacts/);
+});
+
+function legacyImageFixture(version, { stale = false, record = true, missing = false } = {}) {
+  const documents = new Map();
+  const store = (value) => {
+    const bytes = JSON.stringify(value);
+    const digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+    documents.set(digest, bytes); return digest;
+  };
+  const manifests = ['amd64', 'arm64'].map((architecture) => ({
+    digest: store({ config: { digest: store({ architecture, os: 'linux', config: stale ? { Labels: { 'org.opencontainers.image.version': '0.0.0' } } : {} }) } }),
+    platform: { os: 'linux', architecture },
+  }));
+  const index = store({ manifests });
+  return async (url) => {
+    if (url.includes('/users/')) return response(200, { type: 'Organization' });
+    if (url.includes('/versions?')) return response(200, [{ name: record ? index : `sha256:${'0'.repeat(64)}`, metadata: { container: { tags: [version] } } }]);
+    if (url.startsWith('https://api.github.com/')) return response(missing ? 404 : 200, {});
+    if (url.startsWith('https://ghcr.io/token?')) return response(200, { token: 'fixture' });
+    const digest = url.endsWith(`/${version}`) ? index : url.split('/').at(-1);
+    return new Response(documents.get(digest), { headers: { 'docker-content-digest': digest } });
+  };
+}
+test('legacy lockdocs 0.4.0 and repomap 1.5.0 preserve all-channel complete no-op', async () => {
+  for (const [name, version, aliases] of [['lockdocs', '0.4.0', []], ['repomap', '1.5.0', ['spine', 'locus', 'coderag']]]) {
+    const config = { name, version };
+    const packages = [...KEYS.map((key) => `${name}-${key}`), name, ...aliases].map((pkg) => ({ name: `@sylphx/${pkg}`, version, gitHead: canonical.commit }));
+    const release = { tag_name: `v${version}`, assets: requiredAssets(name, version, true, false).map((name) => ({ name })) };
+    assert.equal(release.assets.length, 11, 'five archives and six bundles, no new sidecars');
+    const mcp = await registry(`io.github.SylphxAI/${name}`, version, fixture({ ...registryValue, server: { name: `io.github.SylphxAI/${name}`, version } }));
+    const options = { repository: `SylphxAI/${name}`, commit: 'b'.repeat(40), bundles: true, imageName: name === 'repomap' ? 'ghcr.io/sylphxai/repomap' : '' };
+    const fetcher = legacyImageFixture(version);
+    const result = await deliveryPlan(config, packages, release, mcp, options, fetcher);
+    assert.equal(result.legacy, true);
+    assert.equal(result.done.publish, false);
+    assert.equal(result.canonical.commit, canonical.commit);
+    for (let i = 0; i < packages.length; i++) {
+      const partial = [...packages]; partial[i] = null;
+      await assert.rejects(deliveryPlan(config, partial, release, mcp, options, fetcher), /legacy partial/);
+      const mixed = [...packages]; mixed[i] = { ...mixed[i], gitHead: 'c'.repeat(40) };
+      await assert.rejects(deliveryPlan(config, mixed, release, mcp, options, fetcher), /mixed canonical/);
+    }
+    for (let i = 0; i < release.assets.length; i++) await assert.rejects(deliveryPlan(config, packages, { ...release, assets: release.assets.filter((_, j) => i !== j) }, mcp, options, fetcher), /legacy partial/);
+    await assert.rejects(deliveryPlan(config, packages, release, null, options, fetcher), /legacy partial/);
+    if (options.imageName) {
+      await assert.rejects(deliveryPlan(config, packages, release, mcp, options, legacyImageFixture(version, { missing: true })), /legacy partial/);
+      await assert.rejects(deliveryPlan(config, packages, release, mcp, options, legacyImageFixture(version, { record: false })), /version record mismatch/);
+      await assert.rejects(deliveryPlan(config, packages, release, mcp, options, legacyImageFixture(version, { stale: true })), /identity mismatch/);
+      const imageRecord = await image(options.imageName, version, fetcher, result.canonical, {}, true);
+      assert.equal(imageRecord.verification, 'existing-version-record', 'does not claim native provenance');
+    }
+  }
+});
+test('later same-version main B recovers four platforms and compiles missing platform from A', async () => {
+  const missingKey = KEYS.at(-1), version = '8.3.0', name = 'anymd';
+  const packages = KEYS.map((key) => key === missingKey ? null : { gitHead: canonical.commit });
+  packages.push({ gitHead: canonical.commit });
+  const identities = KEYS.filter((key) => key !== missingKey).map((key) => {
+    const bytes = Buffer.from(JSON.stringify(nativeIdentity(name, version, key, Buffer.from(key), canonical)));
+    return { name: `${name}-${key}.identity.json`, digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`, url: `https://fixture.test/${key}`, bytes };
+  });
+  const result = await deliveryPlan({ name, version }, packages, { assets: identities }, registryValue,
+    { repository: canonical.repository, commit: 'b'.repeat(40) }, async (url) => new Response(identities.find((asset) => asset.url === url).bytes));
+  assert.equal(result.canonical.commit, canonical.commit);
+  assert.equal(result.done.publish, true);
+  const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  for (const job of ['build', 'publish', 'docker']) {
+    const section = workflow.slice(workflow.indexOf(`\n  ${job}:\n`) + 1).split(/\n  [a-z][a-z-]*:/)[0];
+    assert.match(section, /- uses: actions\/checkout@v4\n        with:\n          ref: \$\{\{ needs.check.outputs.canonical \}\}/);
+    assert.match(section, /repository: SylphxAI\/mcp-kit\n          ref: \$\{\{ inputs.kit-ref \}\}/);
+  }
+  const newIdentity = nativeIdentity(name, version, missingKey, Buffer.from('new binary'), result.canonical);
+  assert.equal(newIdentity.source.commit, canonical.commit);
+});
+test('fully absent anymd 8.3.0 remains a fresh canonical identity-backed release', async () => {
+  const trigger = { repository: 'SylphxAI/anymd', commit: 'b'.repeat(40) };
+  const result = await deliveryPlan({ name: 'anymd', version: '8.3.0' }, Array(6).fill(null), null, null,
+    { ...trigger, bundles: true, imageName: 'ghcr.io/sylphxai/anymd' }, async (url) => url.includes('/users/') ? response(200, { type: 'Organization' }) : response(404, {}));
+  assert.equal(result.legacy, false);
+  assert.deepEqual(result.canonical, trigger);
+  assert.deepEqual(result.done, { npm: false, github: false, registry: false, docker: false, publish: true });
+  for (const key of KEYS) assert.deepEqual(nativeIdentity('anymd', '8.3.0', key, Buffer.from(key), result.canonical).source, trigger);
 });

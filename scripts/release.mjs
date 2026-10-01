@@ -60,7 +60,7 @@ export async function github(repo, version, fetcher = fetch) {
   return value;
 }
 
-export async function image(name, version, fetcher = fetch, canonical, natives = {}) {
+export async function image(name, version, fetcher = fetch, canonical, natives = {}, legacyComplete = false) {
   if (!name) return null;
   if (!name.startsWith('ghcr.io/') || !canonical) throw new Error('GHCR requires canonical release identity');
   const repository = name.slice('ghcr.io/'.length);
@@ -90,6 +90,19 @@ export async function image(name, version, fetcher = fetch, canonical, natives =
   };
   const index = await load(`manifests/${encode(version)}`);
   if (!index) return null;
+  if (legacyComplete) {
+    // A pre-identity image is an existing channel record, not new build provenance.
+    // Bind its exact version tag to the immutable index recorded by GitHub Packages.
+    let recorded = false;
+    for (let page = 1; !recorded; page++) {
+      const versions = await request(`https://api.github.com/${ownerKind === 'Organization' ? 'orgs' : 'users'}/${owner}/packages/container/${encode(path.join('/'))}/versions?per_page=100&page=${page}`, githubHeaders(), fetcher);
+      const records = versions && await versions.json();
+      if (!Array.isArray(records)) throw new Error('legacy GHCR version records missing');
+      recorded = records.some((record) => record.name === index.digest && record.metadata?.container?.tags?.includes(version));
+      if (records.length < 100) break;
+    }
+    if (!recorded) throw new Error('legacy GHCR version record mismatch');
+  }
   for (const arch of ['amd64', 'arm64']) {
     const descriptor = index.value.manifests?.find((m) => m.platform?.os === 'linux' && m.platform?.architecture === arch);
     if (!descriptor || !/^sha256:[a-f0-9]{64}$/.test(descriptor.digest)) throw new Error(`GHCR image lacks linux/${arch}`);
@@ -98,9 +111,13 @@ export async function image(name, version, fetcher = fetch, canonical, natives =
     const config = await load(`blobs/${child.value.config.digest}`, child.value.config.digest);
     const labels = config?.value.config?.Labels;
     const key = arch === 'amd64' ? 'linux-x64-gnu' : 'linux-arm64-gnu';
+    if (legacyComplete) {
+      if (config?.value.os !== 'linux' || config.value.architecture !== arch || (labels?.['org.opencontainers.image.version'] && labels['org.opencontainers.image.version'] !== version)) throw new Error('legacy GHCR image identity mismatch');
+      continue;
+    }
     if (config?.value.os !== 'linux' || config.value.architecture !== arch || labels?.['org.opencontainers.image.version'] !== version || labels?.['org.opencontainers.image.revision'] !== canonical.commit || labels?.['org.opencontainers.image.source'] !== `https://github.com/${canonical.repository}` || labels?.[`io.sylphx.native.${key}.sha256`] !== natives[key]?.sha256 || !natives[key]) throw new Error('GHCR image identity mismatch');
   }
-  return { digest: index.digest };
+  return { digest: index.digest, verification: legacyComplete ? 'existing-version-record' : 'native-identity' };
 }
 
 export function sourceIdentity(source) {
@@ -158,8 +175,8 @@ export function cargoIdentity(metadata, cargo, version) {
   if (selected.length !== 1 || selected[0].version !== version) throw new Error(`Cargo package ${cargo} must have version ${version}`);
 }
 
-export function requiredAssets(name, version, bundles) {
-  return [...KEYS.flatMap((key) => [archive(name, key), `${name}-${key}.identity.json`]), ...(bundles ? [`${name}-${version}.mcpb`, ...KEYS.map((key) => `${name}-${version}-${key}.mcpb`)] : [])];
+export function requiredAssets(name, version, bundles, identities = true) {
+  return [...KEYS.flatMap((key) => [archive(name, key), ...(identities ? [`${name}-${key}.identity.json`] : [])]), ...(bundles ? [`${name}-${version}.mcpb`, ...KEYS.map((key) => `${name}-${version}-${key}.mcpb`)] : [])];
 }
 
 export function completion(packages, release, mcp, docker, wantedAssets, wantsDocker) {
@@ -170,6 +187,32 @@ export function completion(packages, release, mcp, docker, wantedAssets, wantsDo
   const dockerDone = !wantsDocker || Boolean(docker);
   return { npm: npmDone, github: githubDone, registry: registryDone, docker: dockerDone,
     publish: !npmDone || !githubDone || !registryDone || !dockerDone };
+}
+
+export async function deliveryPlan(config, packages, release, mcp, { repository, commit, imageName = '', bundles = false }, fetcher = fetch) {
+  const sources = [], nativeIdentities = {};
+  for (const key of KEYS) {
+    const identity = await sidecar(release, config.name, key, fetcher);
+    if (identity) {
+      if (identity.name !== config.name || identity.version !== config.version || identity.platform !== key || !/^[a-f0-9]{64}$/.test(identity.sha256)) throw new Error('original platform identity mismatch');
+      sources.push(identity.source); nativeIdentities[key] = identity;
+    }
+  }
+  for (const published of packages) {
+    if (published) {
+      if (!/^[a-f0-9]{40}$/.test(published.gitHead)) throw new Error('published package lacks canonical source');
+      sources.push({ repository, commit: published.gitHead });
+    }
+  }
+  const canonical = canonicalSource(sources, { repository, commit });
+  const legacy = Boolean(release) && Object.keys(nativeIdentities).length === 0;
+  const wantedAssets = requiredAssets(config.name, config.version, bundles, !legacy);
+  const beforeImage = completion(packages, release, mcp, null, wantedAssets, false);
+  if (legacy && beforeImage.publish) throw new Error('legacy partial release lacks original identities; requested channel recovery requires verified provenance');
+  const docker = await image(imageName, config.version, fetcher, canonical, nativeIdentities, legacy);
+  const done = completion(packages, release, mcp, docker, wantedAssets, Boolean(imageName));
+  if (legacy && done.publish) throw new Error('legacy partial release lacks original identities; requested image recovery requires verified provenance');
+  return { canonical, done, legacy };
 }
 
 export function verifyIntegrity(bytes, integrity) {
@@ -286,23 +329,8 @@ async function main() {
     for (const pkg of config.packages) packages.push(await npm(pkg.name, config.version));
     const release = await github(process.env.GITHUB_REPOSITORY, config.version);
     const mcp = await registry(process.env.MCP_NAME, config.version);
-    const sources = [], nativeIdentities = {};
-    for (const key of KEYS) {
-      const identity = await sidecar(release, config.name, key, fetch);
-      if (identity) {
-        if (identity.name !== config.name || identity.version !== config.version || identity.platform !== key || !/^[a-f0-9]{64}$/.test(identity.sha256)) throw new Error('original platform identity mismatch');
-        sources.push(identity.source); nativeIdentities[key] = identity;
-      }
-      const published = packages[KEYS.indexOf(key)];
-      if (published) {
-        if (!/^[a-f0-9]{40}$/.test(published.gitHead)) throw new Error('published native lacks canonical source; verified provenance migration required');
-        sources.push({ repository: process.env.GITHUB_REPOSITORY, commit: published.gitHead });
-      }
-    }
-    const canonical = canonicalSource(sources, { repository: process.env.GITHUB_REPOSITORY, commit: process.env.GITHUB_SHA });
+    const { canonical, done } = await deliveryPlan(config, packages, release, mcp, { repository: process.env.GITHUB_REPOSITORY, commit: process.env.GITHUB_SHA, imageName: process.env.IMAGE || '', bundles: process.env.MCPB === 'true' });
     output('canonical', canonical.commit);
-    const docker = await image(process.env.IMAGE || '', config.version, fetch, canonical, nativeIdentities);
-    const done = completion(packages, release, mcp, docker, requiredAssets(config.name, config.version, process.env.MCPB === 'true'), Boolean(process.env.IMAGE));
     output('version', config.version); output('dir', config.dir); output('cargo', config.cargo); output('publish', done.publish);
     for (const channel of ['npm', 'github', 'registry', 'docker']) output(`${channel}-missing`, !done[channel]);
     console.log(`release ${config.version}: ${JSON.stringify(done)}`);

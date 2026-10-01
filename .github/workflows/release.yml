@@ -152,6 +152,8 @@ jobs:
           - { key: win32-x64-msvc, os: windows-latest, target: x86_64-pc-windows-msvc, exe: '.exe' }
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.canonical }}
       - uses: actions/checkout@v4
         with:
           repository: SylphxAI/mcp-kit
@@ -224,6 +226,8 @@ jobs:
       ALIASES: ${{ inputs.alias-dirs }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.canonical }}
       - uses: actions/checkout@v4
         with:
           repository: SylphxAI/mcp-kit
@@ -347,6 +351,8 @@ jobs:
       ALIASES: ${{ inputs.alias-dirs }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.canonical }}
       - uses: actions/checkout@v4
         with:
           repository: SylphxAI/mcp-kit
