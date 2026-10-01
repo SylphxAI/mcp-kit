@@ -30,8 +30,8 @@ jobs:
           set -euo pipefail
           V=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="sylphx-mcp-kit") | .version')
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          code=$(curl -s -o /dev/null -w '%{http_code}' -A "sylphx-mcp-kit-ci (github.com/SylphxAI/mcp-kit)" "https://crates.io/api/v1/crates/sylphx-mcp-kit/$V")
-          if [ "$code" = 200 ]; then echo "publish=false" >> "$GITHUB_OUTPUT"; else echo "publish=true" >> "$GITHUB_OUTPUT"; fi
+          present=$(node scripts/release.mjs probe crate sylphx-mcp-kit "$V")
+          if [ "$present" = true ]; then echo "publish=false" >> "$GITHUB_OUTPUT"; else echo "publish=true" >> "$GITHUB_OUTPUT"; fi
       - name: Publish to crates.io
         if: steps.v.outputs.publish == 'true'
         env:
@@ -40,11 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo publish --locked -p sylphx-mcp-kit
-          for i in $(seq 1 60); do
-            curl -fsS -A "sylphx-mcp-kit-ci (github.com/SylphxAI/mcp-kit)" "https://crates.io/api/v1/crates/sylphx-mcp-kit/$V" >/dev/null && break
-            sleep 5
-          done
-          curl -fsS -A "sylphx-mcp-kit-ci (github.com/SylphxAI/mcp-kit)" "https://crates.io/api/v1/crates/sylphx-mcp-kit/$V" | jq '{version: .version.num, created: .version.created_at}'
+          node scripts/release.mjs wait crate sylphx-mcp-kit "$V"
       - name: Tag the release and move v0
         env:
           V: ${{ steps.v.outputs.version }}
