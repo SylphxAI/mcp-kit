@@ -19,8 +19,6 @@ const RETRY_AFTER_MIN: Duration = Duration::from_secs(1);
 const RETRY_AFTER_MAX: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_BODY: u64 = 1 << 20;
-/// Consecutive failed polls tolerated before giving up.
-const MAX_POLL_ERRORS: u32 = 5;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Opts {
@@ -90,6 +88,12 @@ pub(super) fn run(policy: &LicencePolicy, args: &[String]) -> i32 {
         out: &mut out,
         err: &mut err,
     };
+    if std::env::var(policy.env_var).is_ok_and(|v| !v.trim().is_empty()) {
+        eprintln!(
+            "warning: {} is set and overrides the saved licence file; unset it to use the licence saved here.",
+            policy.env_var
+        );
+    }
     flow(policy, &opts, &mut env)
 }
 
@@ -180,6 +184,8 @@ fn flow(policy: &LicencePolicy, opts: &Opts, env: &mut Env) -> i32 {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(REQUEST_TIMEOUT))
         .http_status_as_error(false)
+        .https_only(!env.allow_http)
+        .max_redirects(0)
         .user_agent(concat!("sylphx-mcp-kit/", env!("CARGO_PKG_VERSION")))
         .build()
         .into();
@@ -226,7 +232,12 @@ fn flow(policy: &LicencePolicy, opts: &Opts, env: &mut Env) -> i32 {
         );
     };
     // The poll URL must stay on the checkout origin; the browser URL must be https.
-    if !https_ok(&browser_url, env.allow_http) || !poll_url.starts_with(&origin(base)) {
+    if !https_ok(&browser_url, env.allow_http)
+        || browser_url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '"')
+        || !poll_url.starts_with(&origin(base))
+    {
         return fail(
             policy,
             env,
@@ -247,11 +258,12 @@ fn flow(policy: &LicencePolicy, opts: &Opts, env: &mut Env) -> i32 {
     }
 
     let started = Instant::now();
-    let (mut attempt, mut errors) = (0u32, 0u32);
+    let mut attempt = 0u32;
     loop {
-        let retry_after = match http(&agent, None, &poll_url) {
+        // Only paid and expired end the loop early; a 4xx or a redirect is final;
+        // transport errors, 5xx and 429 are retried until the wait runs out.
+        let (retry_after, last_error) = match http(&agent, None, &poll_url) {
             Ok(r) if (200..300).contains(&r.status) => {
-                errors = 0;
                 let v: Value = serde_json::from_str(&r.body).unwrap_or(Value::Null);
                 match v.get("status").and_then(Value::as_str) {
                     Some("paid") => return paid(policy, opts, env, &claim_id, &v),
@@ -265,45 +277,34 @@ fn flow(policy: &LicencePolicy, opts: &Opts, env: &mut Env) -> i32 {
                             "this checkout expired before it was paid",
                         )
                     }
-                    Some("pending") => {}
-                    _ => {
-                        return fail(
-                            policy,
-                            env,
-                            opts,
-                            "the checkout service sent an unexpected status",
-                        )
-                    }
+                    _ => (r.retry_after, None),
                 }
-                r.retry_after
             }
-            Ok(r) if (400..500).contains(&r.status) && r.status != 429 => {
+            Ok(r) if r.status == 429 || r.status >= 500 => (
+                r.retry_after,
+                Some(format!("the checkout service answered {}", r.status)),
+            ),
+            Ok(r) => {
                 let m = format!("the checkout service answered {} while waiting", r.status);
-                return fail(policy, env, opts, &m);
+                return stopped(policy, opts, env, &claim_id, "error", &m);
             }
-            other => {
-                errors += 1;
-                if errors >= MAX_POLL_ERRORS {
-                    let why = other.map_or_else(|e| e, |r| format!("status {}", r.status));
-                    return fail(
-                        policy,
-                        env,
-                        opts,
-                        &format!("lost contact with the checkout service ({why})"),
-                    );
-                }
-                None
-            }
+            Err(e) => (
+                None,
+                Some(format!("lost contact with the checkout service ({e})")),
+            ),
         };
         if started.elapsed() >= env.wait {
-            return stopped(
-                policy,
-                opts,
-                env,
-                &claim_id,
-                "timeout",
-                "no payment was seen within 30 minutes",
-            );
+            return match last_error {
+                Some(m) => stopped(policy, opts, env, &claim_id, "error", &m),
+                None => stopped(
+                    policy,
+                    opts,
+                    env,
+                    &claim_id,
+                    "timeout",
+                    "no payment was seen within 30 minutes",
+                ),
+            };
         }
         let delay = match retry_after {
             Some(d) => d.clamp(RETRY_AFTER_MIN, RETRY_AFTER_MAX),
@@ -392,7 +393,7 @@ fn refused(
     1
 }
 
-/// Exit 3: the checkout expired. Exit 4: gave up waiting.
+/// Exit 3: the checkout expired. Exit 4: gave up waiting. Exit 1: "error" after the claim exists.
 fn stopped(
     policy: &LicencePolicy,
     opts: &Opts,
@@ -405,7 +406,7 @@ fn stopped(
     if opts.json {
         say(
             env.out,
-            &json!({"event": "result", "status": status, "claim_id": claim_id, "recover": hint})
+            &json!({"event": "result", "status": status, "claim_id": claim_id, "recover": hint, "error": message})
                 .to_string(),
         );
     } else {
@@ -418,10 +419,10 @@ fn stopped(
             &format!("If you did pay, recover your licence: {hint}"),
         );
     }
-    if status == "expired" {
-        3
-    } else {
-        4
+    match status {
+        "expired" => 3,
+        "timeout" => 4,
+        _ => 1,
     }
 }
 
@@ -814,5 +815,92 @@ mod tests {
                 && a(&["--pack"]).is_err()
                 && a(&["--nope"]).is_err()
         );
+    }
+
+    #[test]
+    fn redirect_on_poll_fails_and_saves_nothing() {
+        let redirect = (
+            302,
+            vec![("location", "https://evil.example.com/p".to_string())],
+            String::new(),
+        );
+        let f = fake(vec![claim(), redirect]);
+        let r = go(&f, true, &[], LONG, false);
+        assert_eq!(r.code, 1);
+        assert!(!r.file.exists());
+        assert!(
+            r.err.contains("302") && r.err.contains("/recover"),
+            "{}",
+            r.err
+        );
+        assert_eq!(
+            f.seen.lock().unwrap().len(),
+            2,
+            "the redirect must not be followed"
+        );
+    }
+
+    #[test]
+    fn paid_after_consecutive_503s_still_activates() {
+        let good = signed(1, GOOD);
+        let busy = (503, vec![], String::new());
+        let mut script = vec![claim()];
+        script.extend(std::iter::repeat_with(|| busy.clone()).take(6));
+        script.push((200, vec![], json!({"status": "mystery"}).to_string()));
+        script.push(paid_reply(&[&good]));
+        let f = fake(script);
+        let r = go(&f, true, &[], LONG, false);
+        assert_eq!(r.code, 0, "{} {}", r.out, r.err);
+        assert_eq!(std::fs::read_to_string(&r.file).unwrap(), good);
+        assert_eq!(r.delays.len(), 7);
+    }
+
+    #[test]
+    fn mid_poll_404_prints_recover_and_json_carries_it() {
+        let f = fake(vec![claim(), (404, vec![], String::new())]);
+        let r = go(&f, true, &[], LONG, false);
+        assert_eq!(r.code, 1);
+        assert!(
+            r.err.contains("404") && r.err.contains(&format!("{}/recover", f.base)),
+            "{}",
+            r.err
+        );
+        let f = fake(vec![claim(), (404, vec![], String::new())]);
+        let r = go(&f, true, &["--json"], LONG, false);
+        let last: Value = serde_json::from_str(r.out.lines().last().unwrap()).unwrap();
+        assert_eq!(last["status"], "error");
+        assert_eq!(last["claim_id"], "c1");
+        assert_eq!(last["recover"], format!("{}/recover", f.base));
+    }
+
+    #[test]
+    fn exhausted_budget_on_errors_is_an_error_with_recover() {
+        let f = fake(vec![claim(), (503, vec![], String::new())]);
+        let r = go(&f, true, &[], Duration::from_millis(40), false);
+        assert_eq!(r.code, 1);
+        assert!(
+            r.err.contains("503") && r.err.contains("/recover"),
+            "{}",
+            r.err
+        );
+    }
+
+    #[test]
+    fn browser_url_with_odd_characters_is_refused() {
+        for bad in [
+            "https://p.example.com/a b",
+            "https://p.example.com/a\"b",
+            "https://p.example.com/a\nb",
+        ] {
+            let c = (
+                201,
+                vec![],
+                format!(r#"{{"claim_id":"c","browser_url":"{bad}","poll_url":"{{base}}/p"}}"#),
+            );
+            let f = fake(vec![c]);
+            let r = go(&f, true, &[], LONG, true);
+            assert_eq!(r.code, 1, "{bad}");
+            assert!(r.opened.is_empty());
+        }
     }
 }
