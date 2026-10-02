@@ -270,6 +270,7 @@ jobs:
           set -euo pipefail
           # npm publish returns before the registry serves the version (ETARGET/404
           # for seconds to minutes). Wait per package: natives, main, aliases.
+          # shellcheck source=/dev/null
           . .mcp-kit/scripts/npm-settle.sh
           dirs=()
           for d in "$NATIVES"/*/; do dirs+=("${d%/}"); done
@@ -282,6 +283,7 @@ jobs:
         run: |
           set -euo pipefail
           settle_lib="$PWD/.mcp-kit/scripts/npm-settle.sh"
+          # shellcheck source=/dev/null
           . "$settle_lib"
           cd "$(mktemp -d)"
           # Packages are served (npm view); still retry registry-delay errors in npx.
