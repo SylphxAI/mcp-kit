@@ -7,11 +7,15 @@
 //!   argument, environment variables, a launch default, or the client's roots.
 //! - [`setup`]: register the server with Claude Code, Codex, Cursor, VS Code,
 //!   Claude Desktop, Windsurf and Gemini CLI, and optionally add a Claude Code hook.
+//! - [`licence`] (feature `licence`): sell a Pro tier with an offline-verified
+//!   Ed25519 token, a polite upgrade notice and a `licence` CLI.
 //! - [`embed`] (feature `embed`): local embeddings with a small static model,
 //!   downloaded once and shared by every Sylphx tool.
 
 #[cfg(feature = "embed")]
 pub mod embed;
+#[cfg(feature = "licence")]
+pub mod licence;
 pub mod cache;
 pub mod star_hint;
 #[cfg(feature = "search")]
