@@ -292,7 +292,7 @@ impl Model {
         f.read_exact(&mut head).context("model.q8 is empty")?;
         let n = u32::from_le_bytes(head[0..4].try_into()?) as usize;
         let dims = u32::from_le_bytes(head[4..8].try_into()?) as usize;
-        if len != 8 + n * 4 + n * dims {
+        if model_size(n, dims) != Some(len) {
             bail!("model.q8 is truncated");
         }
         let mut sb = vec![0u8; n * 4];
@@ -542,6 +542,13 @@ pub struct QueryModel {
 
 type Pieces = HashMap<String, u32, std::hash::BuildHasherDefault<Fx>>;
 
+/// The byte size `model.q8` must have for its header: 8 header bytes, one f32
+/// scale per row, then `rows * dims` quantised weights. None when a corrupt
+/// header would overflow the arithmetic.
+fn model_size(rows: usize, dims: usize) -> Option<usize> {
+    8usize.checked_add(rows.checked_mul(4)?)?.checked_add(rows.checked_mul(dims)?)
+}
+
 impl QueryModel {
     /// Open an installed model folder (`model.q8` and `vocab.txt`); None when
     /// the file is missing or its size does not match its header.
@@ -551,7 +558,7 @@ impl QueryModel {
         read_at(&file, &mut head, 0).ok()?;
         let rows = u32::from_le_bytes(head[0..4].try_into().ok()?) as usize;
         let dims = u32::from_le_bytes(head[4..8].try_into().ok()?) as usize;
-        (file.metadata().ok()?.len() as usize == 8 + rows * 4 + rows * dims).then(|| QueryModel { file, vocab: dir.join("vocab.txt"), rows, dims })
+        (model_size(rows, dims)? == file.metadata().ok()?.len() as usize).then(|| QueryModel { file, vocab: dir.join("vocab.txt"), rows, dims })
     }
 
     /// The vocabulary entries that can spell any of `words`: every substring
@@ -686,6 +693,24 @@ fn identifier_words(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_corrupt_header_cannot_overflow_the_size_check() {
+        let max = u32::MAX as usize;
+        assert_eq!(model_size(2, 3), Some(8 + 8 + 6));
+        assert_eq!(model_size(usize::MAX, 2), None);
+        assert_eq!(model_size(max, max).and_then(|n| n.checked_add(usize::MAX)), None);
+        let dir = std::env::temp_dir().join(format!("mk-overflow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut head = Vec::new();
+        head.extend_from_slice(&u32::MAX.to_le_bytes());
+        head.extend_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(dir.join("model.q8"), &head).unwrap();
+        std::fs::write(dir.join("vocab.txt"), "a").unwrap();
+        assert!(QueryModel::open(&dir).is_none());
+        assert!(Model::load_dir(&dir).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn toy() -> Model {
         let words = ["[PAD]", "[UNK]", "read", "file", "##s", "http", "##response", "_", "(", ")", "cafe", "中"];
