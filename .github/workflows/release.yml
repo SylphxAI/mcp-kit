@@ -265,20 +265,30 @@ jobs:
           for d in "$NATIVES"/*/; do pub "${d%/}"; done
           pub "$DIR"
           for a in $ALIASES; do pub "$a"; done
-          # The registry can take minutes to serve new versions; wait once for all.
-          for d in "$NATIVES"/*/ "$DIR" $ALIASES; do
-            name=$(node -p "require('./${d%/}/package.json').name")
-            node .mcp-kit/scripts/release.mjs wait npm "$name" "$V"
-          done
+      - name: Wait for every published package
+        run: |
+          set -euo pipefail
+          # npm publish returns before the registry serves the version (ETARGET/404
+          # for seconds to minutes). Wait per package: natives, main, aliases.
+          . .mcp-kit/scripts/npm-settle.sh
+          dirs=()
+          for d in "$NATIVES"/*/; do dirs+=("${d%/}"); done
+          dirs+=("$DIR")
+          for a in $ALIASES; do dirs+=("$a"); done
+          settle_packages "$V" "${dirs[@]}"
       - name: Smoke the published package
         env:
           SMOKE: ${{ inputs.smoke }}
         run: |
           set -euo pipefail
+          settle_lib="$PWD/.mcp-kit/scripts/npm-settle.sh"
+          . "$settle_lib"
           cd "$(mktemp -d)"
-          actual=$(npx -y "$PKG@$V" version)
+          # Packages are served (npm view); still retry registry-delay errors in npx.
+          actual=$(settle "npx $PKG@$V" npx -y "$PKG@$V" version)
           test "$actual" = "$NAME $V"
-          if [ -n "$SMOKE" ]; then bash -euo pipefail -c "$SMOKE"; else npx -y "$PKG@$V" version; fi
+          # A caller's smoke may source "$SETTLE_LIB" and run checks through `settle`.
+          if [ -n "$SMOKE" ]; then SETTLE_LIB="$settle_lib" bash -euo pipefail -c "$SMOKE"; else npx -y "$PKG@$V" version; fi
       - name: MCP Bundles
         if: inputs.mcpb && needs.check.outputs.github-missing == 'true'
         env:

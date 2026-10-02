@@ -58,6 +58,8 @@ jobs:
           test "$out" = "tool a b" && test "$code" = 3
       - name: Release planning and identity (offline)
         run: node --test scripts/release.test.mjs
+      - name: npm propagation wait (offline)
+        run: bash scripts/npm-settle.test.sh
       - name: MCP Bundles build, validate and run
         run: node --test scripts/mcpb.test.mjs
 
