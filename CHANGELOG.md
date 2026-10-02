@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0
+
+- `embed::QueryModel` (feature `embed`): a query-side embedder that reads only the vocabulary and the rows of the query's own tokens with positioned reads, so a search never loads the weight table. `QueryModel::open(dir)` and `embed(text)` give the same vector as `Model::embed` under `Tokenization::Identifiers`. It moved here from lockdocs so there is one owner of the WordPiece and identifier splitting; `Model` and `QueryModel` now share one WordPiece routine. Additive; the public API of 0.6 is unchanged.
+
 ## 0.6.0
 
 - **Breaking (licence feature):** `LicencePolicy` has a new required field `checkout_base: Option<&str>`. Add `checkout_base: None` to keep today's behaviour. The `licence` feature now also depends on `ureq`.

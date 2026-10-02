@@ -381,36 +381,7 @@ impl Model {
     }
 
     fn wordpiece(&self, word: &str, ids: &mut Vec<u32>) {
-        if word.chars().count() > MAX_WORD_CHARS {
-            return;
-        }
-        let start_len = ids.len();
-        let mut start = 0;
-        while start < word.len() {
-            let map = if start == 0 { &self.first } else { &self.cont };
-            let mut end = word.len();
-            let mut found = None;
-            while end > start {
-                if word.is_char_boundary(end) {
-                    if let Some(id) = map.get(&word[start..end]) {
-                        found = Some(*id);
-                        break;
-                    }
-                }
-                end -= 1;
-            }
-            match found {
-                Some(id) => {
-                    ids.push(id);
-                    start = end;
-                }
-                None => {
-                    // The whole word is [UNK], which model2vec drops.
-                    ids.truncate(start_len);
-                    return;
-                }
-            }
-        }
+        wordpiece(word, ids, |first, piece| if first { self.first.get(piece) } else { self.cont.get(piece) }.copied());
     }
 
     /// Unit-length embedding of a text, or None when no token is known.
@@ -523,6 +494,160 @@ fn is_punct(c: char) -> bool {
     matches!(c as u32, 0x2010..=0x2027 | 0x2030..=0x205E | 0x3000..=0x303F | 0xFF01..=0xFF0F | 0xFF1A..=0xFF20 | 0xFF3B..=0xFF40 | 0xFF5B..=0xFF65 | 0x00A1 | 0x00A7 | 0x00AB | 0x00B6 | 0x00B7 | 0x00BB | 0x00BF)
 }
 
+/// WordPiece one word: longest known piece first, `##` continuation after
+/// that. `lookup(first, piece)` finds a piece (`first` is true at the word
+/// start). A word with an unknown piece is [UNK], which model2vec drops.
+fn wordpiece(word: &str, ids: &mut Vec<u32>, lookup: impl Fn(bool, &str) -> Option<u32>) {
+    if word.chars().count() > MAX_WORD_CHARS {
+        return;
+    }
+    let start_len = ids.len();
+    let mut start = 0;
+    while start < word.len() {
+        let mut end = word.len();
+        let mut found = None;
+        while end > start {
+            if word.is_char_boundary(end) {
+                if let Some(id) = lookup(start == 0, &word[start..end]) {
+                    found = Some(id);
+                    break;
+                }
+            }
+            end -= 1;
+        }
+        match found {
+            Some(id) => {
+                ids.push(id);
+                start = end;
+            }
+            None => {
+                ids.truncate(start_len);
+                return;
+            }
+        }
+    }
+}
+
+/// A query-side embedder that never loads the weight table: it reads the
+/// vocabulary, the row scales and only the rows of the query's own tokens
+/// (about 512 bytes each) with positioned reads. It reproduces
+/// `Model::embed` under `Tokenization::Identifiers` exactly (a test checks
+/// this); build the stored vectors with the full `Model`.
+pub struct QueryModel {
+    file: std::fs::File,
+    vocab: PathBuf,
+    rows: usize,
+    dims: usize,
+}
+
+type Pieces = HashMap<String, u32, std::hash::BuildHasherDefault<Fx>>;
+
+impl QueryModel {
+    /// Open an installed model folder (`model.q8` and `vocab.txt`); None when
+    /// the file is missing or its size does not match its header.
+    pub fn open(dir: &Path) -> Option<QueryModel> {
+        let file = std::fs::File::open(dir.join("model.q8")).ok()?;
+        let mut head = [0u8; 8];
+        read_at(&file, &mut head, 0).ok()?;
+        let rows = u32::from_le_bytes(head[0..4].try_into().ok()?) as usize;
+        let dims = u32::from_le_bytes(head[4..8].try_into().ok()?) as usize;
+        (file.metadata().ok()?.len() as usize == 8 + rows * 4 + rows * dims).then(|| QueryModel { file, vocab: dir.join("vocab.txt"), rows, dims })
+    }
+
+    /// The vocabulary entries that can spell any of `words`: every substring
+    /// of a word is a candidate, so one pass over vocab.txt finds them all
+    /// without building the whole lookup tables.
+    fn pieces(&self, words: &[String]) -> Option<(Pieces, Pieces)> {
+        let mut first = Pieces::default();
+        let mut cont = Pieces::default();
+        for w in words {
+            if w.chars().count() > MAX_WORD_CHARS {
+                continue;
+            }
+            let bounds: Vec<usize> = w.char_indices().map(|(i, _)| i).chain([w.len()]).collect();
+            for (si, &s) in bounds.iter().enumerate() {
+                for &e in &bounds[si + 1..] {
+                    let map = if s == 0 { &mut first } else { &mut cont };
+                    map.entry(w[s..e].to_string()).or_insert(u32::MAX);
+                }
+            }
+        }
+        let text = std::fs::read_to_string(&self.vocab).ok()?;
+        let mut n = 0;
+        for (i, w) in text.split('\n').enumerate() {
+            n += 1;
+            match w.strip_prefix("##") {
+                Some(rest) if !rest.is_empty() => {
+                    if let Some(slot) = cont.get_mut(rest) {
+                        *slot = i as u32;
+                    }
+                }
+                _ => {
+                    if let Some(slot) = first.get_mut(w) {
+                        *slot = i as u32;
+                    }
+                }
+            }
+        }
+        (n == self.rows).then_some((first, cont))
+    }
+
+    /// Unit-length embedding of a query, as `Model::embed` gives it under
+    /// `Tokenization::Identifiers`, or None when no token is known.
+    pub fn embed(&self, text: &str) -> Option<Vec<f32>> {
+        let words = identifier_words(text);
+        let (first, cont) = self.pieces(&words)?;
+        let mut ids = Vec::new();
+        for word in &words {
+            wordpiece(word, &mut ids, |is_first, piece| {
+                let map = if is_first { &first } else { &cont };
+                map.get(piece).copied().filter(|id| *id != u32::MAX)
+            });
+        }
+        if ids.is_empty() {
+            return None;
+        }
+        let mut acc = vec![0f32; self.dims];
+        let mut row = vec![0u8; self.dims];
+        let mut scale = [0u8; 4];
+        let base = 8 + self.rows as u64 * 4;
+        for id in ids {
+            let r = id as usize;
+            read_at(&self.file, &mut scale, 8 + r as u64 * 4).ok()?;
+            read_at(&self.file, &mut row, base + (r * self.dims) as u64).ok()?;
+            let s = f32::from_le_bytes(scale);
+            for (a, q) in acc.iter_mut().zip(&row) {
+                *a += *q as i8 as f32 * s;
+            }
+        }
+        let norm = acc.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm < 1e-9 {
+            return None;
+        }
+        acc.iter_mut().for_each(|x| *x /= norm);
+        Some(acc)
+    }
+}
+
+#[cfg(unix)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], off: u64) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(f, buf, off)
+}
+
+#[cfg(windows)]
+fn read_at(f: &std::fs::File, buf: &mut [u8], mut off: u64) -> std::io::Result<()> {
+    let mut done = 0;
+    while done < buf.len() {
+        let n = std::os::windows::fs::FileExt::seek_read(f, &mut buf[done..], off)?;
+        if n == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        done += n;
+        off += n as u64;
+    }
+    Ok(())
+}
+
 fn identifier_words(text: &str) -> Vec<String> {
     let mut spaced = String::with_capacity(text.len() + 16);
     let mut prev: Option<char> = None;
@@ -611,6 +736,41 @@ mod tests {
         let v = m.embed("readFile").unwrap();
         assert!((v[0] - 1.0 / 5.0f32.sqrt()).abs() < 1e-6);
         assert!((v[1] - 2.0 / 5.0f32.sqrt()).abs() < 1e-6);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn query_model_matches_the_full_model() {
+        // A tiny model: 12 word pieces, 6 dims, deterministic weights.
+        let words = ["use", "state", "form", "action", "##s", "get", "(", ")", "a", "##b", "context", "provider"];
+        let dims = 6usize;
+        let dir = std::env::temp_dir().join(format!("mcp-kit-querymodel-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bytes = Vec::new();
+        bytes.extend((words.len() as u32).to_le_bytes());
+        bytes.extend((dims as u32).to_le_bytes());
+        for i in 0..words.len() {
+            bytes.extend((0.01 + i as f32 * 0.003).to_le_bytes());
+        }
+        for i in 0..words.len() {
+            for d in 0..dims {
+                bytes.push((((i * 7 + d * 13) % 255) as i32 - 127) as i8 as u8);
+            }
+        }
+        std::fs::write(dir.join("model.q8"), &bytes).unwrap();
+        std::fs::write(dir.join("vocab.txt"), words.join("\n")).unwrap();
+        let full = Model::load_dir(&dir).unwrap().with_tokenization(Tokenization::Identifiers);
+        let lite = QueryModel::open(&dir).unwrap();
+        for text in ["useState", "form_actions get(a) abs", "ContextProvider", "unknownword", "", "FormAction (use)"] {
+            match (full.embed(text), lite.embed(text)) {
+                (None, None) => {}
+                (Some(a), Some(b)) => assert!(a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-6), "{text}"),
+                _ => panic!("{text}: one side empty"),
+            }
+        }
+        // A file whose size disagrees with its header is refused.
+        std::fs::write(dir.join("model.q8"), &bytes[..bytes.len() - 1]).unwrap();
+        assert!(QueryModel::open(&dir).is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
