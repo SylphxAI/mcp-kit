@@ -60,6 +60,8 @@ jobs:
         run: node --test scripts/release.test.mjs
       - name: npm propagation wait (offline)
         run: bash scripts/npm-settle.test.sh
+      - name: Registry retry (offline)
+        run: bash scripts/registry-retry.test.sh
       - name: MCP Bundles build, validate and run
         run: node --test scripts/mcpb.test.mjs
 

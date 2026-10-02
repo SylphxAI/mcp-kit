@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KEYS, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, sameSource, deliveryPlan } from './release.mjs';
 
+process.env.RELEASE_RETRY_MS = '0';
 const response = (status, value) => new Response(JSON.stringify(value), { status });
 const fixture = (value) => async () => response(200, value);
 const canonical = { repository: 'x/tool', commit: 'a'.repeat(40) };
@@ -22,6 +23,23 @@ for (const status of [401, 403, 429, 500, 503]) {
     }
   });
 }
+test('transient HTTP 5xx/429 is retried at most 3 times, then fails clearly', async () => {
+  for (const status of [429, 500, 503]) {
+    let calls = 0;
+    await assert.rejects(request('https://example.test/x', {}, async () => { calls++; return response(status, {}); }), new RegExp(`HTTP ${status}`));
+    assert.equal(calls, 3);
+  }
+  let calls = 0;
+  const flaky = async () => (++calls < 3 ? response(500, {}) : response(200, {}));
+  assert.equal((await request('https://example.test/x', {}, flaky)).status, 200);
+  assert.equal(calls, 3);
+  calls = 0;
+  await assert.rejects(request('https://example.test/x', {}, async () => { calls++; return response(403, {}); }), /HTTP 403/);
+  assert.equal(calls, 1, 'non-transient statuses are not retried');
+  calls = 0;
+  assert.equal(await request('https://example.test/x', {}, async () => { calls++; return response(404, {}); }), null);
+  assert.equal(calls, 1);
+});
 test('only HTTP 404 is absent; transport and malformed responses fail', async () => {
   assert.equal(await request('https://example.test/x', {}, async () => response(404, {})), null);
   for (const probe of [npm, registry, crate, github]) {
@@ -188,7 +206,7 @@ test('workflow keeps required build success and verifies replacement before reti
   assert.match(workflow, /registry-retired:\n    needs: \[check, build, publish\]/);
   assert.match(workflow, /needs\.check\.outputs\.publish == 'false' && needs\.build\.result == 'skipped'/);
   const retirement = workflow.slice(workflow.indexOf('  registry-retired:'));
-  assert.ok(retirement.indexOf('require registry "$MCP_NAME" "$V"') < retirement.indexOf('for retired in $RETIRED'));
+  assert.ok(retirement.indexOf('require registry "$MCP_NAME" "$V"') < retirement.indexOf('for retired in $pending'));
   assert.match(workflow, /run: node \.mcp-kit\/scripts\/release\.mjs version/);
   assert.match(workflow, /run: node \.mcp-kit\/scripts\/release\.mjs recover/);
   assert.match(workflow, /stage linux-x64-gnu linux-arm64-gnu/);
