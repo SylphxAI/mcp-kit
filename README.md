@@ -137,6 +137,7 @@ const POLICY: LicencePolicy = LicencePolicy {
     file_name: "licence",                             // then <config dir>/lockdocs/licence
     upgrade_url: "https://example.com/pro",         // also the renewal link in expiry warnings
     tier: "Pro",                                      // what users see: "lockdocs Pro", or "Team"
+    checkout_base: Some("https://checkout.example.com"), // enables `licence buy`; None prints upgrade_url
 };
 
 // In a Pro tool: the licence, or a polite notice the agent relays.
@@ -151,6 +152,8 @@ match require(&POLICY, "Team reports") {
 - `require` reads the env var first, even when it holds a bad token (no silent fallback), then the token file.
 - An unlicensed call is not an error. `required_result_json(&required)` returns the MCP result: text "<feature> is part of <product> <tier>. Learn more and get it: <url>" plus `structuredContent` `{"pro_required": {"feature", "product", "tier", "url"}}` so an agent can act on it. With the `server` feature, `required_result` returns the rmcp type: override `App::call_result` in a gated tool to return it. A Pro tool must not declare an `outputSchema` without `pro_required`.
 - `run_cli(&POLICY, args)` is the `licence status | activate <token>` subcommand to mount in the server binary; `activate` verifies the token and writes the file with 0600 permissions. `status` also prints where the token was read (env var or file) and why it is invalid, and during the last 30 days of a licence it warns "expires in N days" with `upgrade_url` as the renewal link. `licence.expires_soon(Duration)` gives the same check to your own code, e.g. to add a line to a Pro answer; it is false for a licence with no `expiresAt`, and true when expiry is within the window (inclusive) or past.
+- `licence buy [--pack <id>] [--qty <n>] [--no-browser] [--json]` (in `run_cli`) sells through the shared checkout service at `checkout_base` (https only; `None` prints `upgrade_url`). It creates a claim (`POST {checkout_base}/api/v1/claims`), prints the browser URL and opens it unless `--no-browser`, `--json`, no display or non-interactive, then polls the claim (`Retry-After` honoured, backoff capped at 5 s, 30 minutes at most). When paid it verifies the returned tokens, saves the first valid one the way `activate` does and prints the `status` report; on expiry or timeout it points at `{checkout_base}/recover`. Nothing is saved before a token verifies, so Ctrl+C leaves no state.
+- For agents, `--json` prints a line with `claim_id` and `browser_url` as soon as the claim exists (show the link to your user) and a final `{"event":"result","status":...}` line. Exit codes: 0 paid, 1 failed, 2 usage, 3 expired, 4 timed out.
 
 A runnable example is in `crates/mcp-kit/examples/licence_server.rs`.
 

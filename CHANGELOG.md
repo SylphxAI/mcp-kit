@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+- **Breaking (licence feature):** `LicencePolicy` has a new required field `checkout_base: Option<&str>`. Add `checkout_base: None` to keep today's behaviour. The `licence` feature now also depends on `ureq`.
+- `licence buy [--pack <id>] [--qty <n>] [--no-browser] [--json]`, part of `run_cli` (so every product gets `<product> licence buy`, or `pro buy` where it mounts the helper under that name). With `checkout_base: Some("https://...")` (https only) it creates a claim at the shared checkout service (`POST /api/v1/claims`), prints the browser URL and opens it unless `--no-browser`, `--json`, no display or a non-interactive run, then polls the claim honouring `Retry-After` (backoff capped at 5 s) for up to 30 minutes. On `paid` it verifies each returned token and saves the first valid one exactly as `activate` does, then prints the `status` report. On expiry or timeout it prints the recovery link `<checkout_base>/recover`. Nothing is saved before a token verifies, so Ctrl+C leaves no state. With `checkout_base: None` it prints `upgrade_url`.
+- `--json` prints one JSON line when the claim exists (`event: "claim"`, `claim_id`, `browser_url`, `expires_at`) and one at the end (`event: "result"`, `status` of `paid`, `expired`, `timeout`, `invalid`, `error` or `unavailable`), so an agent can show the link to its user while the command keeps polling. Exit codes: 0 paid (or `unavailable`), 1 failed, 2 usage, 3 expired, 4 timed out. Tokens are never printed.
+
 ## 0.5.0
 
 - **Breaking (licence feature):** `LicencePolicy` has a new required field `tier: &str` ("Pro", "Team"). Add `tier: "Pro"` to your policy literal to keep today's wording; a product that sells a team plan sets `tier: "Team"`. `ProRequired` also gains a public `tier: String`; set it if you construct one yourself.

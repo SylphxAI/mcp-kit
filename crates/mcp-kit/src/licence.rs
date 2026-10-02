@@ -21,6 +21,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod buy;
+
 /// What one server sells: who signs, which plans unlock it, where the token lives.
 #[derive(Debug, Clone, Copy)]
 pub struct LicencePolicy<'a> {
@@ -44,6 +46,10 @@ pub struct LicencePolicy<'a> {
     /// ("<feature> is part of <product> <tier>"), `licence status` and the
     /// `pro_required` structured content.
     pub tier: &'a str,
+    /// Base URL (https only) of the shared checkout service. With it,
+    /// `licence buy` starts a purchase and activates the licence when paid;
+    /// with `None`, `buy` prints `upgrade_url` instead.
+    pub checkout_base: Option<&'a str>,
 }
 
 /// A verified licence.
@@ -248,8 +254,9 @@ pub fn required_result(required: &ProRequired) -> rmcp::model::CallToolResult {
     result
 }
 
-/// `licence status | activate <token>`; mount it under any subcommand name and
-/// pass the arguments after it. Returns the exit code.
+/// `licence status | activate <token> | buy [--pack <id>] [--qty <n>]
+/// [--no-browser] [--json]`; mount it under any subcommand name and pass the
+/// arguments after it. Returns the exit code.
 pub fn run_cli(policy: &LicencePolicy, arguments: &[String]) -> i32 {
     let product = policy.product;
     match arguments.first().map(String::as_str) {
@@ -267,8 +274,9 @@ pub fn run_cli(policy: &LicencePolicy, arguments: &[String]) -> i32 {
                 1
             }
         },
+        Some("buy") => buy::run(policy, &arguments[1..]),
         _ => {
-            eprintln!("usage: licence status | licence activate <token>");
+            eprintln!("usage: licence status | licence activate <token> | licence buy [--pack <id>] [--qty <n>] [--no-browser] [--json]");
             2
         }
     }
@@ -313,10 +321,15 @@ fn status_report(policy: &LicencePolicy, found: Option<(String, String)>, now: i
 }
 
 fn activate(policy: &LicencePolicy, token: &str) -> Result<PathBuf, String> {
-    policy.verify(token).map_err(|e| e.to_string())?;
     let path = policy.token_path().ok_or("no config directory on this machine")?;
-    write_token(&path, token.trim()).map_err(|e| format!("cannot write the token file: {e}"))?;
+    activate_at(policy, token, &path)?;
     Ok(path)
+}
+
+/// Verify a token, then save it at `path`. The one save path for `activate` and `buy`.
+fn activate_at(policy: &LicencePolicy, token: &str, path: &Path) -> Result<(), String> {
+    policy.verify(token).map_err(|e| e.to_string())?;
+    write_token(path, token.trim()).map_err(|e| format!("cannot write the token file: {e}"))
 }
 
 /// Write the token file with 0600 permissions on Unix.
@@ -363,6 +376,7 @@ mod tests {
             file_name: "licence",
             upgrade_url: "https://example.com/pro",
             tier: "Pro",
+            checkout_base: None,
         }
     }
     const PRO: &str = r#"{"plan":"pro","email":"a@example.com","issuedAt":1700000000}"#;
