@@ -46,4 +46,15 @@ N
 chmod +x "$work/bin/npm"; export FAKE_LOG="$work/log"
 ( cd "$work" && PATH="$work/bin:$PATH" settle_packages 1.2.3 p/a p/b >/dev/null )
 test "$(tr '\n' ' ' < "$FAKE_LOG")" = "@x/a@1.2.3 @x/b@1.2.3 "
+
+# 6. A stderr warning on success never leaks into captured stdout.
+cat > "$work/bin/warn" <<'W'
+#!/usr/bin/env bash
+echo "npm warn something" >&2; echo "1.2.3"
+W
+chmod +x "$work/bin/warn"
+actual=$(settle t "$work/bin/warn" 2>/dev/null)
+test "$actual" = "1.2.3"
+actual=$(PATH="$work/bin:$PATH" settle t warn 2>/dev/null)
+test "$actual" = "1.2.3"
 echo "npm-settle tests passed"

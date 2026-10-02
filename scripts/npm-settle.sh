@@ -13,23 +13,29 @@
 settle() {
   local label=$1; shift
   local bound=${SETTLE_BOUND:-600} pause=${SETTLE_FIRST:-5} cap=${SETTLE_MAX:-30}
-  local start=$SECONDS attempt=0 out status
+  local start=$SECONDS attempt=0 out err status errf
+  errf=$(mktemp) || return 1
   while :; do
     attempt=$((attempt + 1))
     status=0
-    out=$("$@" 2>&1) || status=$?
+    out=$(timeout 300 "$@" 2>"$errf") || status=$?
+    err=$(cat "$errf")
     if [ "$status" -eq 0 ]; then
+      rm -f "$errf"
       [ -n "$out" ] && printf '%s\n' "$out"
+      [ -n "$err" ] && printf '%s\n' "$err" >&2
       echo "ok: $label (attempt $attempt, $((SECONDS - start))s)" >&2
       return 0
     fi
-    if ! printf '%s' "$out" | grep -qiE 'ETARGET|E404|No matching version|notarget|404 Not Found'; then
-      printf '%s\n' "$out" >&2
+    if ! grep -qiE 'ETARGET|E404|No matching version|notarget|404 Not Found' <<<"$out$err"; then
+      rm -f "$errf"
+      printf '%s\n' "$out" "$err" >&2
       echo "FAILED: $label is not a registry delay (exit $status)" >&2
       return "$status"
     fi
     if [ $((SECONDS - start + pause)) -gt "$bound" ]; then
-      printf '%s\n' "$out" >&2
+      rm -f "$errf"
+      printf '%s\n' "$out" "$err" >&2
       echo "FAILED: $label still not served by the npm registry after $((SECONDS - start))s ($attempt attempts)" >&2
       return 1
     fi

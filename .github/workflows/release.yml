@@ -277,6 +277,14 @@ jobs:
           dirs+=("$DIR")
           for a in $ALIASES; do dirs+=("$a"); done
           settle_packages "$V" "${dirs[@]}"
+          # npm view reads the full packument; npx reads the abbreviated one, so a
+          # passing view does not prove npx can resolve the alias.
+          tmp=$(mktemp -d)
+          cd "$tmp"
+          for a in $ALIASES; do
+            alias_name=$(node -p "require('$OLDPWD/${a%/}/package.json').name")
+            settle "npx $alias_name" npx -y "$alias_name@$V" version >/dev/null
+          done
       - name: Smoke the published package
         env:
           SMOKE: ${{ inputs.smoke }}
