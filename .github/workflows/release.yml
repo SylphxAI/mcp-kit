@@ -346,8 +346,17 @@ jobs:
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
           ./mcp-publisher validate
           ./mcp-publisher login github-oidc
+          # shellcheck source=/dev/null
+          . .mcp-kit/scripts/registry-retry.sh
           present=$(node .mcp-kit/scripts/release.mjs probe registry "$MCP_NAME" "$V")
-          if [ "$present" = false ]; then ./mcp-publisher publish; fi
+          # Publish only a missing version; retry registry 5xx/429 (3 tries), and
+          # accept "already exists" only when the probe then shows the version.
+          if [ "$present" = false ]; then
+            if ! retry_transient "mcp-publisher publish" ./mcp-publisher publish; then
+              present=$(node .mcp-kit/scripts/release.mjs probe registry "$MCP_NAME" "$V")
+              [ "$present" = true ] || { echo "::error::could not publish $MCP_NAME@$V to the MCP Registry"; exit 1; }
+            fi
+          fi
           node .mcp-kit/scripts/release.mjs wait registry "$MCP_NAME" "$V"
 
   docker:
@@ -448,20 +457,26 @@ jobs:
           MESSAGE: ${{ inputs.retired-message }}
         run: |
           set -euo pipefail
+          # shellcheck source=/dev/null
+          . .mcp-kit/scripts/registry-retry.sh
+          # Nothing to do (no login, no download) when every retired name is
+          # already deprecated, e.g. on every push that carries no release.
+          # Registry probes retry 5xx/429 inside release.mjs and fail clearly.
+          pending=""
+          for retired in $RETIRED; do
+            deprecated=$(node .mcp-kit/scripts/release.mjs deprecated "$retired")
+            if [ "$deprecated" = true ]; then echo "$retired already deprecated"; else pending="$pending $retired"; fi
+          done
+          if [ -z "$pending" ]; then echo "nothing to retire"; exit 0; fi
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
           ./mcp-publisher login github-oidc
           node .mcp-kit/scripts/release.mjs require registry "$MCP_NAME" "$V"
-          for retired in $RETIRED; do
-            deprecated=$(node .mcp-kit/scripts/release.mjs deprecated "$retired")
-            if [ "$deprecated" = true ]; then echo "$retired already deprecated"; continue; fi
-            ok=false
-            for attempt in 1 2 3 4 5; do
-              # --yes skips the bulk-operation prompt (no stdin in CI).
-              if out=$(./mcp-publisher status --status deprecated --all-versions --yes --message "$MESSAGE" "$retired" 2>&1) \
-                 || grep -qE 'already set to the provided values|No changes to apply' <<<"$out"; then ok=true; break; fi
-              echo "attempt $attempt: $out"; sleep $((attempt * 15))
-            done
-            [ "$ok" = true ] || { echo "::error::could not deprecate $retired"; exit 1; }
+          for retired in $pending; do
+            # --yes skips the bulk-operation prompt (no stdin in CI). Only
+            # "already set" counts as done; 5xx/429 retry 3 times, then fail.
+            OK_PATTERN='already set to the provided values|No changes to apply' \
+              retry_transient "deprecate $retired" ./mcp-publisher status --status deprecated --all-versions --yes --message "$MESSAGE" "$retired" \
+              || { echo "::error::could not deprecate $retired"; exit 1; }
             for i in $(seq 1 24); do
               echo "checking retired status ($i/24)"
               deprecated=$(node .mcp-kit/scripts/release.mjs deprecated "$retired")

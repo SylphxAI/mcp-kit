@@ -14,8 +14,20 @@ const encode = encodeURIComponent;
 const binary = (name, key) => name + (key.startsWith('win32') ? '.exe' : '');
 const archive = (name, key) => `${name}-${key}.${key.startsWith('win32') ? 'zip' : 'tar.gz'}`;
 
+// HTTP 5xx and 429 are transient: retry with a growing pause (at most 3 tries,
+// RELEASE_RETRY_MS first pause, default 5000), then fail with the last status.
+// Never treated as absent or as success.
 export async function request(url, headers = {}, fetcher = fetch) {
-  const response = await fetcher(url, { headers, signal: AbortSignal.timeout(30000) });
+  const pause = Number(process.env.RELEASE_RETRY_MS ?? 5000);
+  let response;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    response = await fetcher(url, { headers, signal: AbortSignal.timeout(30000) });
+    if (response.status !== 429 && response.status < 500) break;
+    if (attempt < 3) {
+      console.error(`release probe: HTTP ${response.status} at ${new URL(url).origin} (attempt ${attempt}/3); retrying in ${pause * attempt}ms`);
+      await new Promise((r) => setTimeout(r, pause * attempt));
+    }
+  }
   if (response.status === 404) return null;
   if (response.status !== 200) throw new Error(`release probe failed: HTTP ${response.status} at ${new URL(url).origin}`);
   return response;
