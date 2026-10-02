@@ -15,6 +15,7 @@ const POLICY: LicencePolicy = LicencePolicy {
     env_var: "EXAMPLE_LICENCE_TOKEN",
     file_name: "licence",
     upgrade_url: "https://example.com/pro",
+    tier: "Pro", // what users see: "example Pro"; a team plan would say "Team"
 };
 
 struct Example;

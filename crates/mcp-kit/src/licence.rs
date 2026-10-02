@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// What one server sells: who signs, which plans unlock it, where the token lives.
 #[derive(Debug, Clone, Copy)]
@@ -37,8 +38,12 @@ pub struct LicencePolicy<'a> {
     pub env_var: &'a str,
     /// Token file name inside `<config dir>/<product>/`.
     pub file_name: &'a str,
-    /// Where Pro is explained and sold.
+    /// Where Pro is explained and sold, and where an expiring licence is renewed.
     pub upgrade_url: &'a str,
+    /// The tier name users see: "Pro", "Team". Used in the notice
+    /// ("<feature> is part of <product> <tier>"), `licence status` and the
+    /// `pro_required` structured content.
+    pub tier: &'a str,
 }
 
 /// A verified licence.
@@ -59,6 +64,20 @@ pub struct Licence {
     pub seats: Option<u32>,
     #[serde(default, rename = "expiresAt")]
     pub expires_at: Option<i64>,
+}
+
+impl Licence {
+    /// True when the licence expires within `within` from now, or has already
+    /// expired. A licence with no `expiresAt` never expires, so it is false.
+    /// The window is inclusive: expiring exactly `within` from now is soon.
+    pub fn expires_soon(&self, within: Duration) -> bool {
+        self.expires_soon_at(within, now_ms())
+    }
+
+    fn expires_soon_at(&self, within: Duration, now: i64) -> bool {
+        let window = i64::try_from(within.as_millis()).unwrap_or(i64::MAX);
+        self.expires_at.is_some_and(|at| at.saturating_sub(now) <= window)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +196,7 @@ fn find_token(env: Option<String>, file: Option<PathBuf>) -> Option<String> {
 pub struct ProRequired {
     pub feature: String,
     pub product: String,
+    pub tier: String,
     pub url: String,
 }
 
@@ -184,8 +204,8 @@ impl fmt::Display for ProRequired {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} is part of {} Pro. Learn more and get it: {}",
-            self.feature, self.product, self.url
+            "{} is part of {} {}. Learn more and get it: {}",
+            self.feature, self.product, self.tier, self.url
         )
     }
 }
@@ -201,6 +221,7 @@ fn required(policy: &LicencePolicy, feature: &str) -> ProRequired {
     ProRequired {
         feature: feature.to_string(),
         product: policy.product.to_string(),
+        tier: policy.tier.to_string(),
         url: policy.upgrade_url.to_string(),
     }
 }
@@ -212,7 +233,8 @@ pub fn required_result_json(required: &ProRequired) -> Value {
     json!({
         "content": [{"type": "text", "text": required.to_string()}],
         "structuredContent": {"pro_required": {
-            "feature": required.feature, "product": required.product, "url": required.url}},
+            "feature": required.feature, "product": required.product, "tier": required.tier,
+            "url": required.url}},
         "isError": false
     })
 }
@@ -232,36 +254,12 @@ pub fn run_cli(policy: &LicencePolicy, arguments: &[String]) -> i32 {
     let product = policy.product;
     match arguments.first().map(String::as_str) {
         Some("status") if arguments.len() == 1 => {
-            let found = policy.find_token_source();
-            let verified = found.as_ref().map(|(token, _)| policy.verify(token));
-            if let Some((_, source)) = &found {
-                println!("token source: {source}");
-            }
-            match verified {
-                Some(Ok(licence)) => {
-                    println!("{product} Pro: active");
-                    println!("plan: {}", licence.plan);
-                    println!("issuedAt: {}", licence.issued_at);
-                    if let Some(at) = licence.expires_at {
-                        println!("expiresAt: {at}");
-                    }
-                    if let Some(seats) = licence.seats {
-                        println!("seats: {seats}");
-                    }
-                }
-                other => {
-                    println!("{product} Pro: inactive");
-                    if let Some(Err(error)) = other {
-                        println!("token error: {error}");
-                    }
-                    println!("Learn more and get it: {}", policy.upgrade_url);
-                }
-            }
+            print!("{}", status_report(policy, policy.find_token_source(), now_ms()));
             0
         }
         Some("activate") if arguments.len() == 2 => match activate(policy, &arguments[1]) {
             Ok(path) => {
-                println!("{product} Pro activated ({})", path.display());
+                println!("{product} {} activated ({})", policy.tier, path.display());
                 0
             }
             Err(message) => {
@@ -274,6 +272,44 @@ pub fn run_cli(policy: &LicencePolicy, arguments: &[String]) -> i32 {
             2
         }
     }
+}
+
+/// How long before expiry `licence status` starts warning.
+const EXPIRY_WARNING: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The `licence status` text for a token found as `(token, source)`, at `now` (ms).
+fn status_report(policy: &LicencePolicy, found: Option<(String, String)>, now: i64) -> String {
+    let (product, tier) = (policy.product, policy.tier);
+    let verified = found.as_ref().map(|(token, _)| policy.verify_at(token, now));
+    let mut out = String::new();
+    if let Some((_, source)) = &found {
+        out += &format!("token source: {source}\n");
+    }
+    match verified {
+        Some(Ok(licence)) => {
+            out += &format!("{product} {tier}: active\nplan: {}\nissuedAt: {}\n", licence.plan, licence.issued_at);
+            if let Some(at) = licence.expires_at {
+                out += &format!("expiresAt: {at}\n");
+                if licence.expires_soon_at(EXPIRY_WARNING, now) {
+                    // Round up, so the last day reads "1 day" until it has expired.
+                    let days = (at - now + 86_399_999) / 86_400_000;
+                    let unit = if days == 1 { "day" } else { "days" };
+                    out += &format!("warning: this licence expires in {days} {unit}. Renew it: {}\n", policy.upgrade_url);
+                }
+            }
+            if let Some(seats) = licence.seats {
+                out += &format!("seats: {seats}\n");
+            }
+        }
+        other => {
+            out += &format!("{product} {tier}: inactive\n");
+            if let Some(Err(error)) = other {
+                out += &format!("token error: {error}\n");
+            }
+            out += &format!("Learn more and get it: {}\n", policy.upgrade_url);
+        }
+    }
+    out
 }
 
 fn activate(policy: &LicencePolicy, token: &str) -> Result<PathBuf, String> {
@@ -326,6 +362,7 @@ mod tests {
             env_var: "DEMO_LICENCE_TOKEN_UNSET_IN_TESTS",
             file_name: "licence",
             upgrade_url: "https://example.com/pro",
+            tier: "Pro",
         }
     }
     const PRO: &str = r#"{"plan":"pro","email":"a@example.com","issuedAt":1700000000}"#;
@@ -441,10 +478,82 @@ mod tests {
         assert_eq!(v["content"][0]["text"], r.to_string());
         assert_eq!(
             v["structuredContent"]["pro_required"],
-            json!({"feature": "Cite-check", "product": "demo", "url": "https://example.com/pro"})
+            json!({"feature": "Cite-check", "product": "demo", "tier": "Pro", "url": "https://example.com/pro"})
         );
-        assert_eq!(require(&p, "Cite-check").unwrap_err(), r);
+        let team = LicencePolicy { tier: "Team", ..p };
+        let r = required(&team, "Reviews");
+        assert_eq!(r.to_string(), "Reviews is part of demo Team. Learn more and get it: https://example.com/pro");
+        let v = required_result_json(&r);
+        assert_eq!(v["content"][0]["text"], r.to_string());
+        assert_eq!(v["structuredContent"]["pro_required"]["tier"], "Team");
+        assert_eq!(require(&p, "Cite-check").unwrap_err(), required(&p, "Cite-check"));
     }
+
+    fn licence_expiring(at: Option<i64>) -> Licence {
+        Licence {
+            plan: "pro".into(),
+            email: None,
+            issued_at: 1,
+            product: None,
+            order: None,
+            grant: None,
+            seats: None,
+            expires_at: at,
+        }
+    }
+
+    #[test]
+    fn expires_soon_edges() {
+        let day = Duration::from_secs(86_400);
+        let now = 1_000_000_000;
+        let ms = 86_400_000;
+        // No expiry: never soon.
+        assert!(!licence_expiring(None).expires_soon_at(day, now));
+        assert!(!licence_expiring(None).expires_soon(Duration::MAX));
+        // Outside, exactly on, and inside the window.
+        assert!(!licence_expiring(Some(now + ms + 1)).expires_soon_at(day, now));
+        assert!(licence_expiring(Some(now + ms)).expires_soon_at(day, now));
+        assert!(licence_expiring(Some(now + 1)).expires_soon_at(day, now));
+        // Already expired still warns; a zero window is true only at or past expiry.
+        assert!(licence_expiring(Some(now - 1)).expires_soon_at(Duration::ZERO, now));
+        assert!(licence_expiring(Some(now)).expires_soon_at(Duration::ZERO, now));
+        assert!(!licence_expiring(Some(now + 1)).expires_soon_at(Duration::ZERO, now));
+        // A huge window does not overflow.
+        assert!(licence_expiring(Some(i64::MAX)).expires_soon_at(Duration::MAX, now));
+        // The wall-clock entry point.
+        assert!(licence_expiring(Some(now_ms() + 1000)).expires_soon(Duration::from_secs(60)));
+        assert!(!licence_expiring(Some(now_ms() + 10 * 86_400_000)).expires_soon(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn status_shows_tier_and_expiry_warning() {
+        let k = key(1);
+        let pk = public(&k);
+        let keys = [pk.as_str()];
+        let p = LicencePolicy { tier: "Team", ..policy(&keys) };
+        let now = 1_700_000_000_000;
+        let ms = 86_400_000;
+        let status = |extra: &str| {
+            let t = token(&k, &format!(r#"{{"plan":"team","issuedAt":1{extra}}}"#));
+            status_report(&p, Some((t, "ENV".to_string())), now)
+        };
+        let expires = |at: i64| status(&format!(r#","expiresAt":{at}"#));
+
+        let soon = expires(now + 12 * ms + 5);
+        assert!(soon.contains("demo Team: active"), "{soon}");
+        assert!(soon.contains("warning: this licence expires in 13 days. Renew it: https://example.com/pro"), "{soon}");
+        assert!(expires(now + 1).contains("expires in 1 day."));
+        assert!(expires(now + 30 * ms).contains("expires in 30 days"));
+        let far = expires(now + 30 * ms + 1);
+        assert!(far.contains("demo Team: active") && !far.contains("warning"), "{far}");
+        let none = status("");
+        assert!(none.contains("demo Team: active") && !none.contains("warning"), "{none}");
+        let expired = expires(now - 1);
+        assert!(expired.contains("demo Team: inactive") && expired.contains("expired"), "{expired}");
+        let missing = status_report(&p, None, now);
+        assert!(missing.contains("demo Team: inactive") && missing.contains("https://example.com/pro"), "{missing}");
+    }
+
 
     /// A token in the exact shape anymd's tests sign (`SigningKey::from_bytes(&[seed; 32])`,
     /// payload `{"plan":"pro","email":..,"issuedAt":..}`) verifies the same.

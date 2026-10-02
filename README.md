@@ -18,9 +18,9 @@ MIT licensed.
 
 ```toml
 [dependencies]
-sylphx-mcp-kit = "0.4"
+sylphx-mcp-kit = "0.5"
 # only the embeddings, without the server and setup parts:
-# sylphx-mcp-kit = { version = "0.4", default-features = false, features = ["embed"] }
+# sylphx-mcp-kit = { version = "0.5", default-features = false, features = ["embed"] }
 ```
 
 Features: `server` and `setup` (default), `embed`, `search`, `licence`. Cache roots and CLI hints need no feature.
@@ -135,7 +135,8 @@ const POLICY: LicencePolicy = LicencePolicy {
     public_keys: &["<base64url Ed25519 public key>"], // a list, so rotation is additive
     env_var: "LOCKDOCS_LICENCE_TOKEN",                // read first
     file_name: "licence",                             // then <config dir>/lockdocs/licence
-    upgrade_url: "https://example.com/pro",
+    upgrade_url: "https://example.com/pro",         // also the renewal link in expiry warnings
+    tier: "Pro",                                      // what users see: "lockdocs Pro", or "Team"
 };
 
 // In a Pro tool: the licence, or a polite notice the agent relays.
@@ -148,8 +149,8 @@ match require(&POLICY, "Team reports") {
 - Token: `base64url(payloadJSON).base64url(Ed25519 signature over the payload bytes)`, payload `{"plan", "email"?, "issuedAt" (ms), "product"?, "order"?, "grant"?, "seats"?, "expiresAt"? (ms)}`. Unknown fields are ignored. It is byte-compatible with the anymd and GPDT verifiers.
 - `policy.verify(token)` (or `licence::verify(&policy, token)`) checks the signature against any key, then the plan, the `product` (a token naming another product is refused; one naming none is refused when `require_product` is true), and `expiresAt`.
 - `require` reads the env var first, even when it holds a bad token (no silent fallback), then the token file.
-- An unlicensed call is not an error. `required_result_json(&required)` returns the MCP result: text "<feature> is part of <product> Pro. Learn more and get it: <url>" plus `structuredContent` `{"pro_required": {"feature", "product", "url"}}` so an agent can act on it. With the `server` feature, `required_result` returns the rmcp type: override `App::call_result` in a gated tool to return it. A Pro tool must not declare an `outputSchema` without `pro_required`.
-- `run_cli(&POLICY, args)` is the `licence status | activate <token>` subcommand to mount in the server binary; `activate` verifies the token and writes the file with 0600 permissions. `status` also prints where the token was read (env var or file) and why it is invalid.
+- An unlicensed call is not an error. `required_result_json(&required)` returns the MCP result: text "<feature> is part of <product> <tier>. Learn more and get it: <url>" plus `structuredContent` `{"pro_required": {"feature", "product", "tier", "url"}}` so an agent can act on it. With the `server` feature, `required_result` returns the rmcp type: override `App::call_result` in a gated tool to return it. A Pro tool must not declare an `outputSchema` without `pro_required`.
+- `run_cli(&POLICY, args)` is the `licence status | activate <token>` subcommand to mount in the server binary; `activate` verifies the token and writes the file with 0600 permissions. `status` also prints where the token was read (env var or file) and why it is invalid, and during the last 30 days of a licence it warns "expires in N days" with `upgrade_url` as the renewal link. `licence.expires_soon(Duration)` gives the same check to your own code, e.g. to add a line to a Pro answer; it is false for a licence with no `expiresAt`, and true when expiry is within the window (inclusive) or past.
 
 A runnable example is in `crates/mcp-kit/examples/licence_server.rs`.
 
