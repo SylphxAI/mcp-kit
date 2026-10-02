@@ -37,7 +37,7 @@ setup = ["dep:toml_edit"]
 embed = ["dep:serde", "dep:sha2", "dep:unicode-normalization", "dep:ureq"]
 
 # Offline-verified Ed25519 licence tokens for a Pro tier (`mcp_kit::licence`).
-licence = ["dep:base64", "dep:ed25519-dalek", "dep:serde"]
+licence = ["dep:base64", "dep:ed25519-dalek", "dep:serde", "dep:ureq"]
 
 # Lexical primitives without product ranking.
 search = []

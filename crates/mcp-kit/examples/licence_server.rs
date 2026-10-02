@@ -16,6 +16,7 @@ const POLICY: LicencePolicy = LicencePolicy {
     file_name: "licence",
     upgrade_url: "https://example.com/pro",
     tier: "Pro", // what users see: "example Pro"; a team plan would say "Team"
+    checkout_base: None, // Some("https://checkout.example.com") enables `licence buy`
 };
 
 struct Example;
