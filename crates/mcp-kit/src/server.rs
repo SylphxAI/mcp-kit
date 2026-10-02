@@ -39,6 +39,17 @@ pub trait App: Send + Sync + 'static {
     /// Answer one call. Runs on a blocking thread. `Err` becomes a tool error
     /// the agent can read (`isError: true`).
     fn call(&self, name: &str, args: &Value, call: &Call) -> Result<String, String>;
+    /// Answer one call with a full MCP result. The default wraps [`call`](App::call):
+    /// `Ok` is a text result, `Err` a tool error. A gated Pro tool overrides this to
+    /// return `licence::required_result` (a non-error result with `pro_required`
+    /// structured content). Pro tools must not declare an `outputSchema` without
+    /// `pro_required`, or that result would not match it.
+    fn call_result(&self, name: &str, args: &Value, call: &Call) -> CallToolResult {
+        match self.call(name, args, call) {
+            Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
+            Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
+        }
+    }
     /// Called once the client is ready, on a blocking thread; e.g. to warm a cache.
     fn warm(&self, _call: &Call) {}
 }
@@ -101,13 +112,10 @@ impl<A: App> ServerHandler for Handler<A> {
         let app = self.app.clone();
         let name = request.name.to_string();
         let args = Value::Object(request.arguments.unwrap_or_default());
-        let out = tokio::task::spawn_blocking(move || app.call(&name, &args, &call))
+        let out = tokio::task::spawn_blocking(move || app.call_result(&name, &args, &call))
             .await
             .map_err(|e| McpError::internal_error(format!("tool call failed: {e}"), None))?;
-        Ok(CallToolResponse::Complete(match out {
-            Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
-            Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
-        }))
+        Ok(CallToolResponse::Complete(out))
     }
 
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
