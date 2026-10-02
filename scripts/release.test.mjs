@@ -206,7 +206,7 @@ test('workflow keeps required build success and verifies replacement before reti
   assert.match(workflow, /registry-retired:\n    needs: \[check, build, publish\]/);
   assert.match(workflow, /needs\.check\.outputs\.publish == 'false' && needs\.build\.result == 'skipped'/);
   const retirement = workflow.slice(workflow.indexOf('  registry-retired:'));
-  assert.ok(retirement.indexOf('require registry "$MCP_NAME" "$V"') < retirement.indexOf('for retired in $RETIRED'));
+  assert.ok(retirement.indexOf('require registry "$MCP_NAME" "$V"') < retirement.indexOf('for retired in $pending'));
   assert.match(workflow, /run: node \.mcp-kit\/scripts\/release\.mjs version/);
   assert.match(workflow, /run: node \.mcp-kit\/scripts\/release\.mjs recover/);
   assert.match(workflow, /stage linux-x64-gnu linux-arm64-gnu/);

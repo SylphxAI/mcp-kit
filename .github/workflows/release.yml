@@ -434,8 +434,8 @@ jobs:
 
   registry-retired:
     needs: [check, build, publish]
-    # A complete no-op release skips publish. Still verify the replacement;
-    # failure/cancellation must never deprecate its predecessors.
+    # A complete no-op release skips publish. The replacement is verified before
+    # any deprecate call; failure/cancellation must never deprecate its predecessors.
     if: ${{ !cancelled() && inputs.retired-mcp-names != '' && needs.check.result == 'success' && (needs.publish.result == 'success' || (needs.check.outputs.publish == 'false' && needs.build.result == 'skipped' && needs.publish.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
