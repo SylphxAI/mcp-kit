@@ -24,8 +24,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy)]
 pub struct LicencePolicy<'a> {
     /// Product name shown to the user ("lockdocs"). A token that names a
-    /// different `product` is refused; a token without one is accepted.
+    /// different `product` is refused; see `require_product` for one without.
     pub product: &'a str,
+    /// Refuse a token that does not name this product. True for any product
+    /// launched on the Money issuer; false only for anymd back-compat.
+    pub require_product: bool,
     /// Plans that unlock the Pro features ("pro", "team").
     pub accepted_plans: &'a [&'a str],
     /// Trusted public keys (base64url raw Ed25519). A list so rotation is additive.
@@ -114,8 +117,10 @@ impl LicencePolicy<'_> {
         if !self.accepted_plans.contains(&licence.plan.as_str()) {
             return Err(LicenceError::WrongPlan);
         }
-        if licence.product.as_deref().is_some_and(|p| p != self.product) {
-            return Err(LicenceError::WrongProduct);
+        match licence.product.as_deref() {
+            Some(p) if p == self.product => {}
+            None if !self.require_product => {}
+            _ => return Err(LicenceError::WrongProduct),
         }
         if licence.expires_at.is_some_and(|at| at <= now) {
             return Err(LicenceError::Expired);
@@ -130,7 +135,20 @@ impl LicencePolicy<'_> {
 
     /// The configured token: the env var first, else the token file.
     pub fn find_token(&self) -> Option<String> {
-        find_token(std::env::var(self.env_var).ok(), self.token_path())
+        self.find_token_source().map(|(token, _)| token)
+    }
+
+    /// Like [`find_token`](Self::find_token), also saying where it was read: the env var name or the file path.
+    pub fn find_token_source(&self) -> Option<(String, String)> {
+        let env = std::env::var(self.env_var).ok();
+        let path = self.token_path();
+        let from_env = env.as_deref().is_some_and(|t| !t.trim().is_empty());
+        let source = if from_env {
+            self.env_var.to_string()
+        } else {
+            path.as_ref()?.display().to_string()
+        };
+        find_token(env, path).map(|token| (token, source))
     }
 
     /// The active licence, or `None` when no valid token is configured.
@@ -214,8 +232,13 @@ pub fn run_cli(policy: &LicencePolicy, arguments: &[String]) -> i32 {
     let product = policy.product;
     match arguments.first().map(String::as_str) {
         Some("status") if arguments.len() == 1 => {
-            match policy.current() {
-                Some(licence) => {
+            let found = policy.find_token_source();
+            let verified = found.as_ref().map(|(token, _)| policy.verify(token));
+            if let Some((_, source)) = &found {
+                println!("token source: {source}");
+            }
+            match verified {
+                Some(Ok(licence)) => {
                     println!("{product} Pro: active");
                     println!("plan: {}", licence.plan);
                     println!("issuedAt: {}", licence.issued_at);
@@ -226,8 +249,11 @@ pub fn run_cli(policy: &LicencePolicy, arguments: &[String]) -> i32 {
                         println!("seats: {seats}");
                     }
                 }
-                None => {
+                other => {
                     println!("{product} Pro: inactive");
+                    if let Some(Err(error)) = other {
+                        println!("token error: {error}");
+                    }
                     println!("Learn more and get it: {}", policy.upgrade_url);
                 }
             }
@@ -294,6 +320,7 @@ mod tests {
     fn policy<'a>(keys: &'a [&'a str]) -> LicencePolicy<'a> {
         LicencePolicy {
             product: "demo",
+            require_product: false,
             accepted_plans: &["pro", "team"],
             public_keys: keys,
             env_var: "DEMO_LICENCE_TOKEN_UNSET_IN_TESTS",
@@ -340,6 +367,18 @@ mod tests {
             policy(&keys).verify(&token(&k, r#"{"plan":"pro","issuedAt":1,"product":"other"}"#)),
             Err(LicenceError::WrongProduct)
         );
+    }
+
+    #[test]
+    fn require_product_refuses_productless_token() {
+        let k = key(1);
+        let pk = public(&k);
+        let keys = [pk.as_str()];
+        let strict = LicencePolicy { require_product: true, ..policy(&keys) };
+        assert_eq!(strict.verify(&token(&k, PRO)), Err(LicenceError::WrongProduct));
+        let named = token(&k, r#"{"plan":"pro","issuedAt":1,"product":"demo"}"#);
+        assert!(strict.verify(&named).is_ok());
+        assert!(policy(&keys).verify(&token(&k, PRO)).is_ok());
     }
 
     #[test]

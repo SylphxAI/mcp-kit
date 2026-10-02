@@ -130,6 +130,7 @@ use mcp_kit::licence::{require, run_cli, LicencePolicy};
 
 const POLICY: LicencePolicy = LicencePolicy {
     product: "lockdocs",
+    require_product: true,                            // false only for anymd back-compat
     accepted_plans: &["pro", "team"],
     public_keys: &["<base64url Ed25519 public key>"], // a list, so rotation is additive
     env_var: "LOCKDOCS_LICENCE_TOKEN",                // read first
@@ -145,10 +146,10 @@ match require(&POLICY, "Team reports") {
 ```
 
 - Token: `base64url(payloadJSON).base64url(Ed25519 signature over the payload bytes)`, payload `{"plan", "email"?, "issuedAt" (ms), "product"?, "order"?, "grant"?, "seats"?, "expiresAt"? (ms)}`. Unknown fields are ignored. It is byte-compatible with the anymd and GPDT verifiers.
-- `policy.verify(token)` (or `licence::verify(&policy, token)`) checks the signature against any key, then the plan, the `product` when the token names one, and `expiresAt`.
+- `policy.verify(token)` (or `licence::verify(&policy, token)`) checks the signature against any key, then the plan, the `product` (a token naming another product is refused; one naming none is refused when `require_product` is true), and `expiresAt`.
 - `require` reads the env var first, even when it holds a bad token (no silent fallback), then the token file.
-- An unlicensed call is not an error. `required_result_json(&required)` returns the MCP result: text "<feature> is part of <product> Pro. Learn more and get it: <url>" plus `structuredContent` `{"pro_required": {"feature", "product", "url"}}` so an agent can act on it. With the `server` feature, `required_result` returns the rmcp type.
-- `run_cli(&POLICY, args)` is the `licence status | activate <token>` subcommand to mount in the server binary; `activate` verifies the token and writes the file with 0600 permissions.
+- An unlicensed call is not an error. `required_result_json(&required)` returns the MCP result: text "<feature> is part of <product> Pro. Learn more and get it: <url>" plus `structuredContent` `{"pro_required": {"feature", "product", "url"}}` so an agent can act on it. With the `server` feature, `required_result` returns the rmcp type: override `App::call_result` in a gated tool to return it. A Pro tool must not declare an `outputSchema` without `pro_required`.
+- `run_cli(&POLICY, args)` is the `licence status | activate <token>` subcommand to mount in the server binary; `activate` verifies the token and writes the file with 0600 permissions. `status` also prints where the token was read (env var or file) and why it is invalid.
 
 A runnable example is in `crates/mcp-kit/examples/licence_server.rs`.
 
