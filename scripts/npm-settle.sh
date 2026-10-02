@@ -4,7 +4,8 @@
 # later can see ETARGET ("No matching version found") or 404. Source this file
 # and run each check through `settle`; it retries only registry-propagation
 # failures, with growing pauses, logs every attempt (stderr; a check's own
-# output stays on stdout), and fails after the bound.
+# output stays on stdout), and fails after the bound. Each check must be an
+# executable (it runs under `timeout`), not a shell function or builtin.
 #
 #   SETTLE_BOUND  total seconds to wait (default 600)
 #   SETTLE_FIRST  first pause in seconds (default 5); doubles up to SETTLE_MAX
