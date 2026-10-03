@@ -202,7 +202,9 @@ Opt in with one input each; the release then writes `Formula/<name>.rb` (macOS a
 ```yaml
     with:
       homebrew: true   # and/or scoop: true
-    secrets: inherit   # TAP_APP_ID, TAP_APP_PRIVATE_KEY
+    secrets:
+      TAP_APP_ID: ${{ secrets.TAP_APP_ID }}
+      TAP_APP_PRIVATE_KEY: ${{ secrets.TAP_APP_PRIVATE_KEY }}
 ```
 
 | Input | Default |
@@ -212,7 +214,7 @@ Opt in with one input each; the release then writes `Formula/<name>.rb` (macOS a
 | `scoop-bucket` | `SylphxAI/scoop-bucket` |
 | `description`, `homepage`, `license` | the main npm package's, then the GitHub repository for `homepage` |
 
-Writing to another repository uses a GitHub App, never a token: create an org app with **Contents: read and write** on the tap and bucket repositories only, install it on those two, and store its ID and private key as org secrets `TAP_APP_ID` and `TAP_APP_PRIVATE_KEY` (visible to the server repositories). Without the secrets the job skips with a notice and the release is unaffected. Tap and bucket must share one owner. Winget is not generated.
+Writing to another repository uses a GitHub App, never a token: create an org app with **Contents: read and write** on the tap and bucket repositories only, install it on those two, and store its ID and private key as org secrets `TAP_APP_ID` and `TAP_APP_PRIVATE_KEY` (visible to the server repositories). Pass them by name as above and never use `secrets: inherit`: it would hand the reusable workflow every caller secret, including publish tokens. Without the secrets the job skips with a notice and the release is unaffected. Tap and bucket must share one owner. Winget is not generated.
 
 Users: `brew install SylphxAI/tap/<name>`, `scoop bucket add sylphx https://github.com/SylphxAI/scoop-bucket && scoop install <name>`. The rendering lives in `scripts/package-managers.mjs`.
 

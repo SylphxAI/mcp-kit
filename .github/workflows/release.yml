@@ -23,7 +23,7 @@ name: release (reusable)
 # With `homebrew: true` / `scoop: true` the release also updates a Homebrew
 # formula (Formula/<name>.rb) and a Scoop manifest (bucket/<name>.json) from the
 # release archives. Writing to the tap/bucket uses an org GitHub App (secrets
-# TAP_APP_ID and TAP_APP_PRIVATE_KEY, e.g. `secrets: inherit`); without them the
+# TAP_APP_ID and TAP_APP_PRIVATE_KEY, passed by name, never `secrets: inherit`); without them the
 # job skips with a notice and the release is unaffected.
 
 on:
