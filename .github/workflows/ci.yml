@@ -64,6 +64,8 @@ jobs:
         run: bash scripts/registry-retry.test.sh
       - name: MCP Bundles build, validate and run
         run: node --test scripts/mcpb.test.mjs
+      - name: Homebrew formula and Scoop manifest
+        run: node --test scripts/package-managers.test.mjs
 
   plain-language:
     if: github.event_name != 'merge_group'

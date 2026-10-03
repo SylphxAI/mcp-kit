@@ -19,6 +19,12 @@ name: release (reusable)
 # With `mcpb: true` the GitHub release also carries MCP Bundles for one-click
 # install in Claude Desktop and other MCPB hosts: <name>-<version>.mcpb (every
 # platform) and <name>-<version>-<platform>.mcpb (one binary each).
+#
+# With `homebrew: true` / `scoop: true` the release also updates a Homebrew
+# formula (Formula/<name>.rb) and a Scoop manifest (bucket/<name>.json) from the
+# release archives. Writing to the tap/bucket uses an org GitHub App (secrets
+# TAP_APP_ID and TAP_APP_PRIVATE_KEY, passed by name, never `secrets: inherit`); without them the
+# job skips with a notice and the release is unaffected.
 
 on:
   workflow_call:
@@ -81,6 +87,41 @@ on:
         description: 'mcp-kit ref for release helpers and MCP Bundles; pin with the reusable workflow.'
         type: string
         default: v0
+      homebrew:
+        description: 'Update a Homebrew formula (Formula/<name>.rb) in the tap from the release archives.'
+        type: boolean
+        default: false
+      homebrew-tap:
+        description: 'Tap repository (owner/name).'
+        type: string
+        default: SylphxAI/homebrew-tap
+      scoop:
+        description: 'Update a Scoop manifest (bucket/<name>.json) in the bucket from the release archives.'
+        type: boolean
+        default: false
+      scoop-bucket:
+        description: 'Scoop bucket repository (owner/name).'
+        type: string
+        default: SylphxAI/scoop-bucket
+      description:
+        description: 'Formula/manifest description. Default: the main npm package description.'
+        type: string
+        default: ''
+      homepage:
+        description: 'Formula/manifest homepage. Default: the main npm package homepage, else the GitHub repository.'
+        type: string
+        default: ''
+      license:
+        description: 'SPDX licence for the formula/manifest. Default: the main npm package licence.'
+        type: string
+        default: ''
+    secrets:
+      TAP_APP_ID:
+        description: 'GitHub App ID of an app with contents:write on the tap and bucket repositories only.'
+        required: false
+      TAP_APP_PRIVATE_KEY:
+        description: 'Private key of that GitHub App.'
+        required: false
 
 permissions:
   contents: read
@@ -431,6 +472,108 @@ jobs:
           actual=$(docker run --rm --entrypoint "$NAME" "$IMAGE:$V" version)
           test "$actual" = "$NAME $V"
           node .mcp-kit/scripts/release.mjs require image "$IMAGE" "$V"
+
+  package-managers:
+    needs: [check, build, publish]
+    # Like registry-retired: after a release, or on a complete no-op release
+    # (the archives exist), so a missed tap/bucket update heals on the next run.
+    if: ${{ !cancelled() && (inputs.homebrew || inputs.scoop) && needs.check.result == 'success' && (needs.publish.result == 'success' || (needs.check.outputs.publish == 'false' && needs.build.result == 'skipped' && needs.publish.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      NAME: ${{ inputs.name }}
+      V: ${{ needs.check.outputs.version }}
+      TAP: ${{ inputs.homebrew && inputs.homebrew-tap || '' }}
+      BUCKET: ${{ inputs.scoop && inputs.scoop-bucket || '' }}
+    steps:
+      - id: app
+        env:
+          APP_ID: ${{ secrets.TAP_APP_ID }}
+          APP_KEY: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APP_ID" ] || [ -z "$APP_KEY" ]; then
+            echo "::notice::TAP_APP_ID / TAP_APP_PRIVATE_KEY are not set; skipping the Homebrew/Scoop update (the release is unaffected)."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          owner=""; repos=""
+          for r in $TAP $BUCKET; do
+            o=${r%%/*}
+            if [ -n "$owner" ] && [ "$owner" != "$o" ]; then echo "::error::homebrew-tap and scoop-bucket must share one owner"; exit 1; fi
+            owner=$o; repos="$repos${r#*/}"$'\n'
+          done
+          { echo "enabled=true"; echo "owner=$owner"; echo "repos<<EOF"; printf '%s' "$repos"; echo "EOF"; } >> "$GITHUB_OUTPUT"
+      - if: steps.app.outputs.enabled == 'true'
+        id: token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.TAP_APP_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: ${{ steps.app.outputs.owner }}
+          repositories: ${{ steps.app.outputs.repos }}
+          permission-contents: write
+      - if: steps.app.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.canonical }}
+      - if: steps.app.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: SylphxAI/mcp-kit
+          ref: ${{ inputs.kit-ref }}
+          path: .mcp-kit
+          sparse-checkout: scripts
+      - if: steps.app.outputs.enabled == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Render from the release archives
+        if: steps.app.outputs.enabled == 'true'
+        env:
+          DIR: ${{ needs.check.outputs.dir }}
+          DESC: ${{ inputs.description }}
+          HOMEPAGE: ${{ inputs.homepage }}
+          LICENSE_ID: ${{ inputs.license }}
+        run: |
+          set -euo pipefail
+          # The release has no SHA256SUMS asset: hash the published archives.
+          mkdir -p dl
+          gh release download "v$V" --repo "$GITHUB_REPOSITORY" --dir dl --pattern "$NAME-*.tar.gz" --pattern "$NAME-*.zip"
+          (cd dl && sha256sum -- * > ../SHA256SUMS)
+          args=(--name "$NAME" --version "$V" --repo "$GITHUB_REPOSITORY" --sums SHA256SUMS
+            --description "$DESC" --homepage "$HOMEPAGE" --license "$LICENSE_ID")
+          if [ -f "$DIR/package.json" ]; then args+=(--package-json "$DIR/package.json"); fi
+          if [ -n "$TAP" ]; then args+=(--formula-out "out/tap/Formula/$NAME.rb"); fi
+          if [ -n "$BUCKET" ]; then args+=(--scoop-out "out/bucket/bucket/$NAME.json"); fi
+          node .mcp-kit/scripts/package-managers.mjs "${args[@]}"
+      - name: Commit to the tap and bucket
+        if: steps.app.outputs.enabled == 'true'
+        env:
+          TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          set -euo pipefail
+          push_to() {
+            local repo=$1 src=$2 file=$3
+            git clone --depth 1 "https://x-access-token:$TOKEN@github.com/$repo.git" "work/$repo"
+            mkdir -p "work/$repo/$(dirname "$file")"
+            cp "$src/$file" "work/$repo/$file"
+            cd "work/$repo"
+            git add "$file"
+            if git diff --cached --quiet; then echo "= $repo $file already at $V"; cd "$GITHUB_WORKSPACE"; return; fi
+            git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "$NAME $V"
+            for _ in 1 2 3; do
+              if git push -q origin HEAD; then echo "+ $repo $file $V"; cd "$GITHUB_WORKSPACE"; return; fi
+              git pull -q --rebase origin "$(git rev-parse --abbrev-ref HEAD)"
+            done
+            echo "::error::could not push $file to $repo"; exit 1
+          }
+          if [ -n "$TAP" ]; then push_to "$TAP" "$GITHUB_WORKSPACE/out/tap" "Formula/$NAME.rb"; fi
+          if [ -n "$BUCKET" ]; then push_to "$BUCKET" "$GITHUB_WORKSPACE/out/bucket" "bucket/$NAME.json"; fi
 
   registry-retired:
     needs: [check, build, publish]
