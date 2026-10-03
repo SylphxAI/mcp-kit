@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2
+
+- `licence buy` accepts plain `http://` for a loopback `checkout_base` only (`127.0.0.1`, `localhost`, `[::1]`, optional numeric port), so a product's end-to-end test can run the buy flow against a local checkout server. Any other base still needs `https://`; the authority is matched exactly, so `http://localhost:80@evil.com` and `http://localhost.evil.com` stay refused. `checkout_base` is compile-time, so a user cannot turn this on. No API change.
+
 ## 0.7.1
 
 - `release.yml`: opt-in `homebrew` and `scoop` inputs (with `homebrew-tap`, `scoop-bucket`, `description`, `homepage`, `license`) update a Homebrew formula and a Scoop manifest from the release archives after each release. Writes use a GitHub App (`TAP_APP_ID`, `TAP_APP_PRIVATE_KEY` secrets); without them the job skips. Rendering is `scripts/package-managers.mjs`. No Rust change.
