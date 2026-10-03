@@ -80,7 +80,7 @@ pub(super) fn run(policy: &LicencePolicy, args: &[String]) -> i32 {
     let sleep: &dyn Fn(Duration) = &std::thread::sleep;
     let (mut out, mut err) = (std::io::stdout(), std::io::stderr());
     let mut env = Env {
-        allow_http: false,
+        allow_http: loopback_http(policy.checkout_base),
         token_path: policy.token_path(),
         open: (!opts.no_browser && !opts.json && interactive && has_display()).then_some(open),
         sleep,
@@ -95,6 +95,23 @@ pub(super) fn run(policy: &LicencePolicy, args: &[String]) -> i32 {
         );
     }
     flow(policy, &opts, &mut env)
+}
+
+/// Plain http is accepted only for a checkout base on this machine (a local test server).
+/// The authority must be exactly a loopback host with an optional numeric port, so
+/// `localhost:80@evil.com` (userinfo) and `localhost.evil.com` do not qualify.
+fn loopback_http(base: Option<&str>) -> bool {
+    let Some(rest) = base.and_then(|b| b.strip_prefix("http://")) else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    ["127.0.0.1", "localhost", "[::1]"].iter().any(|h| {
+        authority.strip_prefix(h).is_some_and(|r| {
+            r.is_empty()
+                || r.strip_prefix(':')
+                    .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        })
+    })
 }
 
 fn has_display() -> bool {
@@ -492,6 +509,37 @@ mod tests {
     use std::io::{BufRead, BufReader, Read};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn loopback_http_accepts_only_a_bare_loopback_authority() {
+        for ok in [
+            "http://127.0.0.1",
+            "http://127.0.0.1:8080",
+            "http://localhost/",
+            "http://localhost:3000/api",
+            "http://[::1]:9",
+            "http://localhost?x=1",
+        ] {
+            assert!(loopback_http(Some(ok)), "{ok}");
+        }
+        for bad in [
+            "https://localhost",
+            "https://buy.sylphx.com",
+            "http://buy.sylphx.com",
+            "http://localhost:80@evil.com",
+            "http://localhost@evil.com",
+            "http://localhost.evil.com",
+            "http://127.0.0.1.evil.com",
+            "http://localhost:",
+            "http://localhost:80a",
+            "http://[::1]x",
+            "http://",
+            "localhost",
+        ] {
+            assert!(!loopback_http(Some(bad)), "{bad}");
+        }
+        assert!(!loopback_http(None));
+    }
 
     /// `(status, extra headers, body)`; `{base}` in a body becomes the server's address.
     type Scripted = (u16, Vec<(&'static str, String)>, String);
