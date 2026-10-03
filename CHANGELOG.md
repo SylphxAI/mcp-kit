@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- `release.yml`: opt-in `homebrew` and `scoop` inputs (with `homebrew-tap`, `scoop-bucket`, `description`, `homepage`, `license`) update a Homebrew formula and a Scoop manifest from the release archives after each release. Writes use a GitHub App (`TAP_APP_ID`, `TAP_APP_PRIVATE_KEY` secrets); without them the job skips. Rendering is `scripts/package-managers.mjs`. No Rust change.
+
 ## 0.7.0
 
 - `embed::QueryModel` (feature `embed`): a query-side embedder that reads only the vocabulary and the rows of the query's own tokens with positioned reads, so a search never loads the weight table. `QueryModel::open(dir)` and `embed(text)` give the same vector as `Model::embed` under `Tokenization::Identifiers`. It moved here from lockdocs so there is one owner of the WordPiece and identifier splitting; `Model` and `QueryModel` now share one WordPiece routine. Additive; the public API of 0.6 is unchanged.

@@ -195,6 +195,27 @@ jobs:
 
 The workflow checks every requested delivery channel: all five native npm packages, the launcher and aliases, the GitHub release assets (including requested bundles), the exact MCP Registry version, and the optional GHCR image. A fresh run finishes missing channels without republishing delivered packages or overwriting existing release assets. HTTP 404 alone means absent; authentication, throttling, server and transport errors stop the run rather than authorizing publication.
 
+### Homebrew and Scoop
+
+Opt in with one input each; the release then writes `Formula/<name>.rb` (macOS and Linux, arm64 and x86_64) to the tap and `bucket/<name>.json` (Windows x64, with `checkver` and `autoupdate`) to the bucket, from the digests of the release archives. It runs after the release, and again on a no-op run, so a missed update heals. Unchanged files are not committed.
+
+```yaml
+    with:
+      homebrew: true   # and/or scoop: true
+    secrets: inherit   # TAP_APP_ID, TAP_APP_PRIVATE_KEY
+```
+
+| Input | Default |
+| --- | --- |
+| `homebrew`, `scoop` | `false` |
+| `homebrew-tap` | `SylphxAI/homebrew-tap` |
+| `scoop-bucket` | `SylphxAI/scoop-bucket` |
+| `description`, `homepage`, `license` | the main npm package's, then the GitHub repository for `homepage` |
+
+Writing to another repository uses a GitHub App, never a token: create an org app with **Contents: read and write** on the tap and bucket repositories only, install it on those two, and store its ID and private key as org secrets `TAP_APP_ID` and `TAP_APP_PRIVATE_KEY` (visible to the server repositories). Without the secrets the job skips with a notice and the release is unaffected. Tap and bucket must share one owner. Winget is not generated.
+
+Users: `brew install SylphxAI/tap/<name>`, `scoop bucket add sylphx https://github.com/SylphxAI/scoop-bucket && scoop install <name>`. The rendering lives in `scripts/package-managers.mjs`.
+
 The selected Cargo package, npm manifests and `server.json` must carry the same version and publication identity. Executable native targets must report that exact version. Every native artifact carries its platform, version, source and binary SHA-256; staging checks these before publishing, including cross-compiled targets.
 
 A version has one canonical repository commit, established from original platform identities and published native source revisions; conflicting sources stop the run. Recovery preserves the original platform identity and verifies its binary digest, version and canonical source. GitHub archives require a digest-verified original identity asset; npm fallback requires registry integrity, the embedded manifest and original identity, with a matching registry source revision. Already-complete legacy releases remain verified no-ops: every native, launcher and alias must share an immutable npm source revision, the exact MCP Registry version must be active, and all five archives and requested bundles must exist. No new sidecars or build provenance are manufactured. A requested legacy GHCR image must have both digest-verified Linux architectures and an established GitHub Packages version record binding the exact version tag to its index digest; this verifies existing delivery, not native-source provenance. Any conflicting version label fails. When recovery is needed, missing GitHub sidecars are not proof of a legacy release: the planner first verifies available npm tarball integrity, embedded manifests and original native identities against the shared canonical source. Interrupted modern deliveries resume using those original identities. Legacy partial releases without original identities fail closed when a requested channel needs recovery, rather than relabelling or overwriting old bytes. Missing natives compile from the canonical commit, not a later same-version main commit. GHCR readback verifies digest-addressed child manifests and configs for both architectures, checking version, canonical revision, source and native digests; an existing stale version tag is an error. Authorized GitHub package metadata confirms first-image absence; token denials never mean absent. Old MCP Registry names are retired only after the replacement's exact version is verified available, including otherwise complete no-op runs.
