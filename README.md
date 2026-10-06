@@ -23,7 +23,7 @@ sylphx-mcp-kit = "0.5"
 # sylphx-mcp-kit = { version = "0.5", default-features = false, features = ["embed"] }
 ```
 
-Features: `server` and `setup` (default), `embed`, `search`, `licence`. Cache roots and CLI hints need no feature.
+Features: `server` and `setup` (default), `embed`, `search`, `licence`, `remote`. Cache roots and CLI hints need no feature.
 
 ## Server
 
@@ -64,6 +64,26 @@ rmcp is the official Rust SDK, kept in step with the MCP spec, so a server needs
 - cancellation, progress and logging
 - pagination and result caching fields
 - tasks, and structured and error results with the right shape for each protocol version
+
+## Remote server
+
+With the `remote` feature the same `App` is served over Streamable HTTP as an OAuth resource server, the way the [MCP authorization spec](https://modelcontextprotocol.io/specification/latest/basic/authorization) asks:
+
+```rust
+use mcp_kit::remote::{serve, Remote};
+
+let remote = Remote::new("https://example.com/mcp", "https://auth.example.com")
+    .scopes(["things:read", "things:write"])
+    .require(["things:read"])              // every request
+    .tool_scopes("make_thing", ["things:write"]); // one tool (step-up)
+serve(Echo, remote, "0.0.0.0:8080").await?;
+```
+
+- `POST /mcp` is stateless (any replica answers), with JSON responses. `GET /.well-known/oauth-protected-resource/mcp` is the RFC 9728 metadata naming the issuer.
+- The bearer must be a JWT access token signed by a key in the issuer's JWKS (`jwks_uri`, or discovered through RFC 8414, then OpenID Connect; refreshed every 10 minutes and on an unknown key id), issued by that issuer, with the resource URL in `aud` (RFC 8707) and a live `exp` (60 s skew). ES256, RS256, PS256 and EdDSA are accepted; `none` and HMAC never are.
+- No token or a bad one is 401, a missing scope 403 `insufficient_scope`; both carry an RFC 6750 `WWW-Authenticate` challenge with `resource_metadata`, so a client can find the authorization server and ask for the scope.
+- Override `App::call_as` to act for the caller: it receives a `remote::Principal` (subject, scopes, all claims).
+- `Host` must be the resource URL's host (DNS-rebinding defence); `allowed_hosts` and `allowed_origins` change that.
 
 ## Setup
 

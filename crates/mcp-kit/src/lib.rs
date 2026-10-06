@@ -9,6 +9,9 @@
 //!   Claude Desktop, Windsurf and Gemini CLI, and optionally add a Claude Code hook.
 //! - [`licence`] (feature `licence`): sell a Pro tier with an offline-verified
 //!   Ed25519 token, a polite upgrade notice and a `licence` CLI.
+//! - [`remote`] (feature `remote`): serve the same app over Streamable HTTP as
+//!   an OAuth resource server (RFC 9728 metadata, audience-bound JWT bearer
+//!   check, RFC 6750 challenges).
 //! - [`embed`] (feature `embed`): local embeddings with a small static model,
 //!   downloaded once and shared by every Sylphx tool.
 
@@ -18,6 +21,8 @@ pub mod embed;
 pub mod licence;
 pub mod cache;
 pub mod star_hint;
+#[cfg(feature = "remote")]
+pub mod remote;
 #[cfg(feature = "search")]
 pub mod search;
 pub mod roots;

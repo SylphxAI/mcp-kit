@@ -50,6 +50,14 @@ pub trait App: Send + Sync + 'static {
             Err(text) => CallToolResult::error(vec![ContentBlock::text(text)]),
         }
     }
+    /// Answer one call from a remote client, with the caller's verified
+    /// access token (feature `remote`). The default ignores the caller and runs
+    /// [`call_result`](App::call_result); override it to act for the caller.
+    #[cfg(feature = "remote")]
+    fn call_as(&self, name: &str, args: &Value, call: &Call, principal: &crate::remote::Principal) -> CallToolResult {
+        let _ = principal;
+        self.call_result(name, args, call)
+    }
     /// Called once the client is ready, on a blocking thread; e.g. to warm a cache.
     fn warm(&self, _call: &Call) {}
 }
@@ -58,6 +66,8 @@ struct Handler<A: App> {
     app: Arc<A>,
     /// Client roots, fetched on first use and dropped when the client says they changed.
     roots: Arc<Mutex<Option<Vec<PathBuf>>>>,
+    /// Served over HTTP: the client's roots are not folders on this machine.
+    remote: bool,
 }
 
 impl<A: App> Handler<A> {
@@ -65,6 +75,9 @@ impl<A: App> Handler<A> {
     // (Claude Code, Cursor, VS Code) say which folder is open.
     #[allow(deprecated)]
     async fn client_roots(&self, peer: &rmcp::Peer<RoleServer>) -> Vec<PathBuf> {
+        if self.remote {
+            return Vec::new();
+        }
         if let Some(r) = self.roots.lock().unwrap().clone() {
             return r;
         }
@@ -112,7 +125,19 @@ impl<A: App> ServerHandler for Handler<A> {
         let app = self.app.clone();
         let name = request.name.to_string();
         let args = Value::Object(request.arguments.unwrap_or_default());
-        let out = tokio::task::spawn_blocking(move || app.call_result(&name, &args, &call))
+        #[cfg(feature = "remote")]
+        let principal = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|p| p.extensions.get::<crate::remote::Principal>())
+            .cloned();
+        let out = tokio::task::spawn_blocking(move || {
+            #[cfg(feature = "remote")]
+            if let Some(p) = &principal {
+                return app.call_as(&name, &args, &call, p);
+            }
+            app.call_result(&name, &args, &call)
+        })
             .await
             .map_err(|e| McpError::internal_error(format!("tool call failed: {e}"), None))?;
         Ok(CallToolResponse::Complete(out))
@@ -136,10 +161,16 @@ where
     T: rmcp::transport::IntoTransport<RoleServer, E, M>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let handler = Handler { app: Arc::new(app), roots: Arc::new(Mutex::new(None)) };
+    let handler = Handler { app: Arc::new(app), roots: Arc::new(Mutex::new(None)), remote: false };
     let running = handler.serve(transport).await?;
     running.waiting().await?;
     Ok(())
+}
+
+/// A handler for one remote (HTTP) request (feature `remote`).
+#[cfg(feature = "remote")]
+pub(crate) fn remote_handler<A: App>(app: Arc<A>) -> impl ServerHandler {
+    Handler { app, roots: Arc::new(Mutex::new(None)), remote: true }
 }
 
 /// Serve `app` on stdin/stdout until the client disconnects.
