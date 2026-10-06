@@ -26,6 +26,8 @@ unicode-normalization = { version = "0.1", optional = true }
 ureq = { version = "3", optional = true }
 base64 = { version = "0.22", optional = true }
 ed25519-dalek = { version = "2", optional = true }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"], optional = true }
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"], optional = true }
 
 [features]
 default = ["server", "setup"]
@@ -39,6 +41,10 @@ embed = ["dep:serde", "dep:sha2", "dep:unicode-normalization", "dep:ureq"]
 # Offline-verified Ed25519 licence tokens for a Pro tier (`mcp_kit::licence`).
 licence = ["dep:base64", "dep:ed25519-dalek", "dep:serde", "dep:ureq"]
 
+# The same server over Streamable HTTP as an OAuth resource server: RFC 9728
+# metadata and an audience-bound JWT bearer check (`mcp_kit::remote`).
+remote = ["server", "rmcp/transport-streamable-http-server", "tokio/net", "dep:axum", "dep:jsonwebtoken", "dep:ureq"]
+
 # Lexical primitives without product ranking.
 search = []
 
@@ -46,6 +52,7 @@ search = []
 tempfile = "3"
 rmcp = { version = "3.4", default-features = false, features = ["server", "client", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "io-std", "io-util", "macros"] }
+p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 
 [[example]]
 name = "licence_server"
@@ -54,3 +61,7 @@ required-features = ["licence", "server"]
 [[test]]
 name = "server"
 required-features = ["server"]
+
+[[test]]
+name = "remote"
+required-features = ["remote"]

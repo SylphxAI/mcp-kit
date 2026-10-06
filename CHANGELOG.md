@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.3
+
+- Add the `remote` feature (off by default): `remote::router` and `remote::serve` run the same `App` over Streamable HTTP (rmcp, stateless, JSON responses) as an OAuth resource server, as the MCP authorization spec asks. `Remote::new(resource_url, issuer)` sets the token audience (RFC 8707) and the issuer; `GET /.well-known/oauth-protected-resource<path>` serves the RFC 9728 metadata. Every MCP request needs a JWT access token signed by a key in the issuer's JWKS (`jwks_uri`, or discovered through RFC 8414, then OpenID Connect), with the configured `iss`, the resource in `aud`, and a live `exp`. A missing or bad token is 401 and a missing scope (`require`, or `tool_scopes` for one tool) is 403 `insufficient_scope`, each with an RFC 6750 `WWW-Authenticate` challenge naming `resource_metadata`. `App::call_as` (default: `call_result`) receives the caller as a `remote::Principal` (subject, scopes, claims). Additive; the public API of 0.7 is unchanged.
+
 ## 0.7.2
 
 - `licence buy` accepts plain `http://` for a loopback `checkout_base` only (`127.0.0.1`, `localhost`, `[::1]`, optional numeric port), so a product's end-to-end test can run the buy flow against a local checkout server. Any other base still needs `https://`; the authority is matched exactly, so `http://localhost:80@evil.com` and `http://localhost.evil.com` stay refused. `checkout_base` is compile-time, so a user cannot turn this on. No API change.
