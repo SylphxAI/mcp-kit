@@ -18,9 +18,9 @@ MIT licensed.
 
 ```toml
 [dependencies]
-sylphx-mcp-kit = "0.5"
+sylphx-mcp-kit = "0.7.3"
 # only the embeddings, without the server and setup parts:
-# sylphx-mcp-kit = { version = "0.5", default-features = false, features = ["embed"] }
+# sylphx-mcp-kit = { version = "0.7.3", default-features = false, features = ["embed"] }
 ```
 
 Features: `server` and `setup` (default), `embed`, `search`, `licence`, `remote`. Cache roots and CLI hints need no feature.

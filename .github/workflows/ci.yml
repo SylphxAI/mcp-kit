@@ -67,6 +67,24 @@ jobs:
       - name: Homebrew formula and Scoop manifest
         run: node --test scripts/package-managers.test.mjs
 
+  semver:
+    # Standard hosted runners are free only for public repositories.
+    if: github.event_name == 'merge_group' || github.event.repository.private == false
+    runs-on: ${{ github.event_name == 'merge_group' && 'sylphx-linux-standard-merge' || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo install --locked cargo-semver-checks --version 0.51.0
+      - name: Public API compatibility, including licence
+        env:
+          BASELINE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || 'origin/main' }}
+        # Require compatibility even when a 0.x minor version is bumped.
+        run: cargo semver-checks --package sylphx-mcp-kit --all-features --baseline-rev "$BASELINE" --release-type patch
+
   plain-language:
     if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
@@ -107,7 +125,7 @@ jobs:
 
   ci:
     if: always()
-    needs: [test, plain-language, identifiers, other-os]
+    needs: [test, semver, plain-language, identifiers, other-os]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
