@@ -108,6 +108,19 @@ jobs:
       - name: Non-v7 ids on added lines (owner standards/identifiers.md)
         uses: SylphxAI/.github/.github/actions/identifiers@e4a5ea41cbcc87cd93914f89f0d7c3981c868bf9
 
+  chat-senders:
+    # Standard hosted runners are free only for public repositories.
+    if: github.event_name == 'merge_group' || github.event.repository.private == false
+    runs-on: ${{ github.event_name == 'merge_group' && 'sylphx-linux-standard-merge' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: SylphxAI/.github/.github/actions/chat-senders@5cfd55a41435cca8e4b7caf6506faf04ca08d200
+        with:
+          mode: fail
+
   other-os:
     # A plain name: GitHub adds the matrix value, and a skipped job does not
     # show an unexpanded `${{ matrix.os }}`.
@@ -125,7 +138,7 @@ jobs:
 
   ci:
     if: always()
-    needs: [test, semver, plain-language, identifiers, other-os]
+    needs: [test, semver, plain-language, identifiers, chat-senders, other-os]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
