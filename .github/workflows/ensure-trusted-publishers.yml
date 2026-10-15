@@ -1,0 +1,32 @@
+name: Ensure crates.io trusted publishers
+
+# One-shot: give every crate this repository publishes its crates.io trusted
+# publisher record, so the publish workflow can mint a short-lived OIDC token
+# instead of reading a long-lived registry secret. Idempotent — a crate whose
+# record already exists is left alone. Run before the first release that relies
+# on trusted publishing, then the org CARGO_REGISTRY_TOKEN is revoked and no
+# workflow reads it again.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ensure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure sylphx-mcp-kit has a trusted publisher
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 -I scripts/ensure-trusted-publishers.py \
+            --crate sylphx-mcp-kit \
+            --owner SylphxAI \
+            --repo mcp-kit \
+            --workflow publish.yml \
+            --environment crates-io
