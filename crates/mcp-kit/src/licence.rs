@@ -10,7 +10,8 @@
 //! code here), then gates a Pro feature with [`require`] and answers an
 //! unlicensed call with [`required_result_json`], a normal (non-error) MCP
 //! tool result the agent relays to the user. [`run_cli`] is the generic
-//! `licence status | activate <token>` subcommand.
+//! `licence status | activate <token>` subcommand. [`run_money_cli`] also buys
+//! through public Money checkout, configured from the product's storefront.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -22,6 +23,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 mod buy;
+mod checkout;
+mod pending;
+
+pub use checkout::{MoneyCheckout, MoneyPriceOption};
+use pending::write_private;
 
 /// What one server sells: who signs, which plans unlock it, where the token lives.
 #[derive(Debug, Clone, Copy)]
@@ -46,9 +52,8 @@ pub struct LicencePolicy<'a> {
     /// ("<feature> is part of <product> <tier>"), `licence status` and the
     /// `pro_required` structured content.
     pub tier: &'a str,
-    /// Base URL (https only) of the shared checkout service. With it,
-    /// `licence buy` starts a purchase and activates the licence when paid;
-    /// with `None`, `buy` prints `upgrade_url` instead.
+    /// Deprecated, inert compatibility field. `run_cli` prints `upgrade_url` for
+    /// `buy`; use [`run_money_cli`] with a [`MoneyCheckout`] to enable purchases.
     pub checkout_base: Option<&'a str>,
 }
 
@@ -82,7 +87,8 @@ impl Licence {
 
     fn expires_soon_at(&self, within: Duration, now: i64) -> bool {
         let window = i64::try_from(within.as_millis()).unwrap_or(i64::MAX);
-        self.expires_at.is_some_and(|at| at.saturating_sub(now) <= window)
+        self.expires_at
+            .is_some_and(|at| at.saturating_sub(now) <= window)
     }
 }
 
@@ -123,11 +129,19 @@ impl LicencePolicy<'_> {
     }
 
     fn verify_at(&self, token: &str, now: i64) -> Result<Licence, LicenceError> {
-        let (payload_b64, sig_b64) = token.trim().split_once('.').ok_or(LicenceError::Malformed)?;
-        let payload = URL_SAFE_NO_PAD.decode(payload_b64).map_err(|_| LicenceError::Malformed)?;
-        let sig = URL_SAFE_NO_PAD.decode(sig_b64).map_err(|_| LicenceError::Malformed)?;
+        let (payload_b64, sig_b64) = token
+            .trim()
+            .split_once('.')
+            .ok_or(LicenceError::Malformed)?;
+        let payload = URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .map_err(|_| LicenceError::Malformed)?;
+        let sig = URL_SAFE_NO_PAD
+            .decode(sig_b64)
+            .map_err(|_| LicenceError::Malformed)?;
         let signature = Signature::from_slice(&sig).map_err(|_| LicenceError::Malformed)?;
-        let licence: Licence = serde_json::from_slice(&payload).map_err(|_| LicenceError::Malformed)?;
+        let licence: Licence =
+            serde_json::from_slice(&payload).map_err(|_| LicenceError::Malformed)?;
         let verified = self.public_keys.iter().any(|key| {
             URL_SAFE_NO_PAD
                 .decode(key)
@@ -248,20 +262,47 @@ pub fn required_result_json(required: &ProRequired) -> Value {
 /// The same result as an rmcp type (needs the `server` feature too).
 #[cfg(feature = "server")]
 pub fn required_result(required: &ProRequired) -> rmcp::model::CallToolResult {
-    let mut result =
-        rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(required.to_string())]);
-    result.structured_content = required_result_json(required).get("structuredContent").cloned();
+    let mut result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+        required.to_string(),
+    )]);
+    result.structured_content = required_result_json(required)
+        .get("structuredContent")
+        .cloned();
     result
 }
 
-/// `licence status | activate <token> | buy [--pack <id>] [--qty <n>]
-/// [--no-browser] [--json]`; mount it under any subcommand name and pass the
-/// arguments after it. Returns the exit code.
+/// `licence status | activate <token> | buy`; mount under any subcommand name.
+/// `buy` prints `upgrade_url` without a network call, even with `checkout_base`.
+/// Use [`run_money_cli`] to enable the public Money checkout flow.
 pub fn run_cli(policy: &LicencePolicy, arguments: &[String]) -> i32 {
+    dispatch_cli(policy, None, arguments)
+}
+
+/// Like [`run_cli`], with public Money checkout for `buy [--pack <id>] [--qty <n>]
+/// [--email <address>] [--accept-terms] [--no-browser] [--json]`.
+/// Noninteractive/JSON purchases require explicit email and consent. Pending
+/// purchases resume from a private file beside the licence; conflicting orders
+/// are refused. No licence token or claim secret is printed.
+pub fn run_money_cli(
+    policy: &LicencePolicy,
+    checkout: &MoneyCheckout,
+    arguments: &[String],
+) -> i32 {
+    dispatch_cli(policy, Some(checkout), arguments)
+}
+
+fn dispatch_cli(
+    policy: &LicencePolicy,
+    checkout: Option<&MoneyCheckout>,
+    arguments: &[String],
+) -> i32 {
     let product = policy.product;
     match arguments.first().map(String::as_str) {
         Some("status") if arguments.len() == 1 => {
-            print!("{}", status_report(policy, policy.find_token_source(), now_ms()));
+            print!(
+                "{}",
+                status_report(policy, policy.find_token_source(), now_ms())
+            );
             0
         }
         Some("activate") if arguments.len() == 2 => match activate(policy, &arguments[1]) {
@@ -274,9 +315,9 @@ pub fn run_cli(policy: &LicencePolicy, arguments: &[String]) -> i32 {
                 1
             }
         },
-        Some("buy") => buy::run(policy, &arguments[1..]),
+        Some("buy") => buy::run(policy, checkout, &arguments[1..]),
         _ => {
-            eprintln!("usage: licence status | licence activate <token> | licence buy [--pack <id>] [--qty <n>] [--no-browser] [--json]");
+            eprintln!("usage: licence status | licence activate <token> | licence buy [--pack <id>] [--qty <n>] [--email <address>] [--accept-terms] [--no-browser] [--json]");
             2
         }
     }
@@ -288,21 +329,29 @@ const EXPIRY_WARNING: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// The `licence status` text for a token found as `(token, source)`, at `now` (ms).
 fn status_report(policy: &LicencePolicy, found: Option<(String, String)>, now: i64) -> String {
     let (product, tier) = (policy.product, policy.tier);
-    let verified = found.as_ref().map(|(token, _)| policy.verify_at(token, now));
+    let verified = found
+        .as_ref()
+        .map(|(token, _)| policy.verify_at(token, now));
     let mut out = String::new();
     if let Some((_, source)) = &found {
         out += &format!("token source: {source}\n");
     }
     match verified {
         Some(Ok(licence)) => {
-            out += &format!("{product} {tier}: active\nplan: {}\nissuedAt: {}\n", licence.plan, licence.issued_at);
+            out += &format!(
+                "{product} {tier}: active\nplan: {}\nissuedAt: {}\n",
+                licence.plan, licence.issued_at
+            );
             if let Some(at) = licence.expires_at {
                 out += &format!("expiresAt: {at}\n");
                 if licence.expires_soon_at(EXPIRY_WARNING, now) {
                     // Round up, so the last day reads "1 day" until it has expired.
                     let days = (at - now + 86_399_999) / 86_400_000;
                     let unit = if days == 1 { "day" } else { "days" };
-                    out += &format!("warning: this licence expires in {days} {unit}. Renew it: {}\n", policy.upgrade_url);
+                    out += &format!(
+                        "warning: this licence expires in {days} {unit}. Renew it: {}\n",
+                        policy.upgrade_url
+                    );
                 }
             }
             if let Some(seats) = licence.seats {
@@ -321,7 +370,9 @@ fn status_report(policy: &LicencePolicy, found: Option<(String, String)>, now: i
 }
 
 fn activate(policy: &LicencePolicy, token: &str) -> Result<PathBuf, String> {
-    let path = policy.token_path().ok_or("no config directory on this machine")?;
+    let path = policy
+        .token_path()
+        .ok_or("no config directory on this machine")?;
     activate_at(policy, token, &path)?;
     Ok(path)
 }
@@ -334,30 +385,7 @@ fn activate_at(policy: &LicencePolicy, token: &str, path: &Path) -> Result<(), S
 
 /// Write the token file atomically (temp file in the same directory, then rename), 0600 on Unix.
 pub fn write_token(path: &Path, token: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let written = (|| {
-        let mut file = options.open(&tmp)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        }
-        file.write_all(token.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
+    write_private(path, token.as_bytes())
 }
 
 #[cfg(test)]
@@ -373,7 +401,11 @@ mod tests {
     }
     fn token(key: &SigningKey, payload: &str) -> String {
         let sig = key.sign(payload.as_bytes());
-        format!("{}.{}", URL_SAFE_NO_PAD.encode(payload), URL_SAFE_NO_PAD.encode(sig.to_bytes()))
+        format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(payload),
+            URL_SAFE_NO_PAD.encode(sig.to_bytes())
+        )
     }
     fn policy<'a>(keys: &'a [&'a str]) -> LicencePolicy<'a> {
         LicencePolicy {
@@ -400,7 +432,10 @@ mod tests {
         assert_eq!(l.email.as_deref(), Some("a@example.com"));
         let full = r#"{"plan":"team","issuedAt":5,"product":"demo","order":"pi_1","grant":"g/0","seats":5,"expiresAt":9999999999999}"#;
         let l = verify(&policy(&keys), &token(&k, full)).unwrap();
-        assert_eq!((l.seats, l.order.as_deref(), l.grant.as_deref()), (Some(5), Some("pi_1"), Some("g/0")));
+        assert_eq!(
+            (l.seats, l.order.as_deref(), l.grant.as_deref()),
+            (Some(5), Some("pi_1"), Some("g/0"))
+        );
     }
 
     #[test]
@@ -408,10 +443,19 @@ mod tests {
         let (k, other) = (key(1), key(2));
         let pk = public(&k);
         let keys = [pk.as_str()];
-        assert_eq!(policy(&keys).verify(&token(&other, PRO)), Err(LicenceError::BadSignature));
+        assert_eq!(
+            policy(&keys).verify(&token(&other, PRO)),
+            Err(LicenceError::BadSignature)
+        );
         let sig = token(&k, PRO).split_once('.').unwrap().1.to_string();
-        let forged = format!("{}.{sig}", URL_SAFE_NO_PAD.encode(r#"{"plan":"pro","issuedAt":1}"#));
-        assert_eq!(policy(&keys).verify(&forged), Err(LicenceError::BadSignature));
+        let forged = format!(
+            "{}.{sig}",
+            URL_SAFE_NO_PAD.encode(r#"{"plan":"pro","issuedAt":1}"#)
+        );
+        assert_eq!(
+            policy(&keys).verify(&forged),
+            Err(LicenceError::BadSignature)
+        );
     }
 
     #[test]
@@ -424,7 +468,10 @@ mod tests {
             Err(LicenceError::WrongPlan)
         );
         assert_eq!(
-            policy(&keys).verify(&token(&k, r#"{"plan":"pro","issuedAt":1,"product":"other"}"#)),
+            policy(&keys).verify(&token(
+                &k,
+                r#"{"plan":"pro","issuedAt":1,"product":"other"}"#
+            )),
             Err(LicenceError::WrongProduct)
         );
     }
@@ -434,8 +481,14 @@ mod tests {
         let k = key(1);
         let pk = public(&k);
         let keys = [pk.as_str()];
-        let strict = LicencePolicy { require_product: true, ..policy(&keys) };
-        assert_eq!(strict.verify(&token(&k, PRO)), Err(LicenceError::WrongProduct));
+        let strict = LicencePolicy {
+            require_product: true,
+            ..policy(&keys)
+        };
+        assert_eq!(
+            strict.verify(&token(&k, PRO)),
+            Err(LicenceError::WrongProduct)
+        );
         let named = token(&k, r#"{"plan":"pro","issuedAt":1,"product":"demo"}"#);
         assert!(strict.verify(&named).is_ok());
         assert!(policy(&keys).verify(&token(&k, PRO)).is_ok());
@@ -456,7 +509,10 @@ mod tests {
         let pk = public(&k);
         let keys = [pk.as_str()];
         let t = token(&k, r#"{"plan":"pro","issuedAt":1,"expiresAt":1000}"#);
-        assert_eq!(policy(&keys).verify_at(&t, 1000), Err(LicenceError::Expired));
+        assert_eq!(
+            policy(&keys).verify_at(&t, 1000),
+            Err(LicenceError::Expired)
+        );
         assert!(policy(&keys).verify_at(&t, 999).is_ok());
         assert_eq!(policy(&keys).verify(&t), Err(LicenceError::Expired));
     }
@@ -466,7 +522,10 @@ mod tests {
         let k = key(1);
         let pk = public(&k);
         let keys = [pk.as_str()];
-        let t = token(&k, r#"{"plan":"pro","issuedAt":1,"future":{"a":[1]},"x":null}"#);
+        let t = token(
+            &k,
+            r#"{"plan":"pro","issuedAt":1,"future":{"a":[1]},"x":null}"#,
+        );
         assert!(policy(&keys).verify(&t).is_ok());
     }
 
@@ -477,16 +536,49 @@ mod tests {
         let good = token(&key(1), PRO);
         write_token(&file, &good).unwrap();
         // Env wins even when invalid: no silent fallback to the file.
-        assert_eq!(find_token(Some("junk".into()), Some(file.clone())).as_deref(), Some("junk"));
-        assert_eq!(find_token(None, Some(file.clone())).as_deref(), Some(good.as_str()));
-        assert_eq!(find_token(Some("  ".into()), Some(file.clone())).as_deref(), Some(good.as_str()));
+        assert_eq!(
+            find_token(Some("junk".into()), Some(file.clone())).as_deref(),
+            Some("junk")
+        );
+        assert_eq!(
+            find_token(None, Some(file.clone())).as_deref(),
+            Some(good.as_str())
+        );
+        assert_eq!(
+            find_token(Some("  ".into()), Some(file.clone())).as_deref(),
+            Some(good.as_str())
+        );
         let other = dir.path().join("none");
-        assert_eq!(find_token(Some("env".into()), Some(other.clone())).as_deref(), Some("env"));
+        assert_eq!(
+            find_token(Some("env".into()), Some(other.clone())).as_deref(),
+            Some("env")
+        );
         assert_eq!(find_token(None, Some(other)), None);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn private_atomic_token_write_replaces_existing_file_without_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("licence");
+        write_token(&path, "original").unwrap();
+        write_token(&path, "replacement").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 
@@ -495,7 +587,10 @@ mod tests {
         let keys: [&str; 0] = [];
         let p = policy(&keys);
         let r = required(&p, "Cite-check");
-        assert_eq!(r.to_string(), "Cite-check is part of demo Pro. Learn more and get it: https://example.com/pro");
+        assert_eq!(
+            r.to_string(),
+            "Cite-check is part of demo Pro. Learn more and get it: https://example.com/pro"
+        );
         let v = required_result_json(&r);
         assert_eq!(v["isError"], false);
         assert_eq!(v["content"][0]["text"], r.to_string());
@@ -505,11 +600,17 @@ mod tests {
         );
         let team = LicencePolicy { tier: "Team", ..p };
         let r = required(&team, "Reviews");
-        assert_eq!(r.to_string(), "Reviews is part of demo Team. Learn more and get it: https://example.com/pro");
+        assert_eq!(
+            r.to_string(),
+            "Reviews is part of demo Team. Learn more and get it: https://example.com/pro"
+        );
         let v = required_result_json(&r);
         assert_eq!(v["content"][0]["text"], r.to_string());
         assert_eq!(v["structuredContent"]["pro_required"]["tier"], "Team");
-        assert_eq!(require(&p, "Cite-check").unwrap_err(), required(&p, "Cite-check"));
+        assert_eq!(
+            require(&p, "Cite-check").unwrap_err(),
+            required(&p, "Cite-check")
+        );
     }
 
     fn licence_expiring(at: Option<i64>) -> Licence {
@@ -545,7 +646,8 @@ mod tests {
         assert!(licence_expiring(Some(i64::MAX)).expires_soon_at(Duration::MAX, now));
         // The wall-clock entry point.
         assert!(licence_expiring(Some(now_ms() + 1000)).expires_soon(Duration::from_secs(60)));
-        assert!(!licence_expiring(Some(now_ms() + 10 * 86_400_000)).expires_soon(Duration::from_secs(60)));
+        assert!(!licence_expiring(Some(now_ms() + 10 * 86_400_000))
+            .expires_soon(Duration::from_secs(60)));
     }
 
     #[test]
@@ -553,7 +655,10 @@ mod tests {
         let k = key(1);
         let pk = public(&k);
         let keys = [pk.as_str()];
-        let p = LicencePolicy { tier: "Team", ..policy(&keys) };
+        let p = LicencePolicy {
+            tier: "Team",
+            ..policy(&keys)
+        };
         let now = 1_700_000_000_000;
         let ms = 86_400_000;
         let status = |extra: &str| {
@@ -564,19 +669,35 @@ mod tests {
 
         let soon = expires(now + 12 * ms + 5);
         assert!(soon.contains("demo Team: active"), "{soon}");
-        assert!(soon.contains("warning: this licence expires in 13 days. Renew it: https://example.com/pro"), "{soon}");
+        assert!(
+            soon.contains(
+                "warning: this licence expires in 13 days. Renew it: https://example.com/pro"
+            ),
+            "{soon}"
+        );
         assert!(expires(now + 1).contains("expires in 1 day."));
         assert!(expires(now + 30 * ms).contains("expires in 30 days"));
         let far = expires(now + 30 * ms + 1);
-        assert!(far.contains("demo Team: active") && !far.contains("warning"), "{far}");
+        assert!(
+            far.contains("demo Team: active") && !far.contains("warning"),
+            "{far}"
+        );
         let none = status("");
-        assert!(none.contains("demo Team: active") && !none.contains("warning"), "{none}");
+        assert!(
+            none.contains("demo Team: active") && !none.contains("warning"),
+            "{none}"
+        );
         let expired = expires(now - 1);
-        assert!(expired.contains("demo Team: inactive") && expired.contains("expired"), "{expired}");
+        assert!(
+            expired.contains("demo Team: inactive") && expired.contains("expired"),
+            "{expired}"
+        );
         let missing = status_report(&p, None, now);
-        assert!(missing.contains("demo Team: inactive") && missing.contains("https://example.com/pro"), "{missing}");
+        assert!(
+            missing.contains("demo Team: inactive") && missing.contains("https://example.com/pro"),
+            "{missing}"
+        );
     }
-
 
     /// A token in the exact shape anymd's tests sign (`SigningKey::from_bytes(&[seed; 32])`,
     /// payload `{"plan":"pro","email":..,"issuedAt":..}`) verifies the same.
@@ -586,11 +707,20 @@ mod tests {
         let pk = public(&k);
         let keys = [pk.as_str()];
         let plans = ["pro"];
-        let p = LicencePolicy { accepted_plans: &plans, ..policy(&keys) };
+        let p = LicencePolicy {
+            accepted_plans: &plans,
+            ..policy(&keys)
+        };
         let l = p
-            .verify(&token(&k, r#"{"plan":"pro","email":"buyer@example.com","issuedAt":1700000000}"#))
+            .verify(&token(
+                &k,
+                r#"{"plan":"pro","email":"buyer@example.com","issuedAt":1700000000}"#,
+            ))
             .unwrap();
-        assert_eq!((l.plan.as_str(), l.issued_at, l.expires_at, l.seats), ("pro", 1_700_000_000, None, None));
+        assert_eq!(
+            (l.plan.as_str(), l.issued_at, l.expires_at, l.seats),
+            ("pro", 1_700_000_000, None, None)
+        );
         // The Money issuer's payload adds product/order/grant; the extra fields verify too.
         let money = r#"{"plan":"pro","email":"b@example.com","issuedAt":1,"product":"demo","order":"pi_x","grant":"cs/line_items/0"}"#;
         assert!(p.verify(&token(&k, money)).is_ok());

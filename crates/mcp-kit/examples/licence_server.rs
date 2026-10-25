@@ -15,8 +15,8 @@ const POLICY: LicencePolicy = LicencePolicy {
     env_var: "EXAMPLE_LICENCE_TOKEN",
     file_name: "licence",
     upgrade_url: "https://example.com/pro",
-    tier: "Pro", // what users see: "example Pro"; a team plan would say "Team"
-    checkout_base: None, // Some("https://checkout.example.com") enables `licence buy`
+    tier: "Pro",         // what users see: "example Pro"; a team plan would say "Team"
+    checkout_base: None, // inert; use run_money_cli + MoneyCheckout to enable `buy`
 };
 
 struct Example;
