@@ -28,6 +28,10 @@ base64 = { version = "0.22", optional = true }
 ed25519-dalek = { version = "2", optional = true }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"], optional = true }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"], optional = true }
+fs2 = { version = "0.4", optional = true }
+getrandom = { version = "0.2", optional = true }
+tempfile = { version = "3", optional = true }
+url = { version = "2", optional = true }
 
 [features]
 default = ["server", "setup"]
@@ -39,7 +43,7 @@ setup = ["dep:toml_edit"]
 embed = ["dep:serde", "dep:sha2", "dep:unicode-normalization", "dep:ureq"]
 
 # Offline-verified Ed25519 licence tokens for a Pro tier (`mcp_kit::licence`).
-licence = ["dep:base64", "dep:ed25519-dalek", "dep:serde", "dep:ureq"]
+licence = ["dep:base64", "dep:ed25519-dalek", "dep:serde", "dep:ureq", "dep:toml_edit", "dep:fs2", "dep:getrandom", "dep:tempfile", "dep:url"]
 
 # The same server over Streamable HTTP as an OAuth resource server: RFC 9728
 # metadata and an audience-bound JWT bearer check (`mcp_kit::remote`).
