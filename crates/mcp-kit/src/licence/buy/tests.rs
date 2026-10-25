@@ -48,6 +48,9 @@ fn fake(replies: Vec<Scripted>) -> Fake {
                 }
                 Err(_) => return,
             };
+            // macOS accepts sockets with the listener's nonblocking flag;
+            // restore blocking mode before the scripted request reads.
+            stream.set_nonblocking(false).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
