@@ -217,11 +217,13 @@ impl MoneyCheckout {
         option: &'a MoneyPriceOption,
         qty: Option<u32>,
     ) -> Result<(&'a str, u32), String> {
-        // --qty overrides the pack's default seat quantity; it does not multiply it.
-        let quantity = qty.unwrap_or(option.quantity);
-        if !(1..=10_000).contains(&quantity) {
-            return Err("--qty must be between 1 and 10000".into());
-        }
+        // Preserve the established CLI contract: --qty is a pack count, so the
+        // Money line quantity is pack seats × pack count (5 seats × 2 = 10).
+        let quantity = option
+            .quantity
+            .checked_mul(qty.unwrap_or(1))
+            .filter(|quantity| (1..=10_000).contains(quantity))
+            .ok_or("--pack and --qty must multiply to between 1 and 10000 seats")?;
         Ok((&option.key, quantity))
     }
 }

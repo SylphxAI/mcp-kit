@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1
+
+- Preserve the established pack-count contract: `--qty` multiplies the selected pack's seats (`--pack 5 --qty 2` buys 10 seats), with products above 10000 refused. This corrects the 0.8.0 quantity override.
+
 ## 0.8.0
 
 - Replace legacy checkout claims with public Sylphx Money `clientCreate` and claim-secret `redeem`. Add `MoneyCheckout`, `MoneyPriceOption` and `run_money_cli`; read a named offer from the product's existing Keel docs.toml with `MoneyCheckout::from_docs_toml`. Keep `LicencePolicy` fields and `run_cli` source-compatible: `checkout_base` is now inert, and `run_cli` prints `upgrade_url` for `buy` without network access.
