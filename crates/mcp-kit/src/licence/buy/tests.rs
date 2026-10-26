@@ -288,7 +288,7 @@ fn public_create_redeem_first_valid_activation_and_headers() {
     assert!(seen[0].headers.contains("idempotency-key: mcp-checkout-"));
     assert_eq!(seen[0].body["product"], "demo_seat_year");
     assert_eq!(seen[0].body["price"], "seat");
-    assert_eq!(seen[0].body["quantity"], 3);
+    assert_eq!(seen[0].body["quantity"], 15);
     assert_eq!(seen[0].body["consent"]["terms_text"], c.consent_text);
     assert_eq!(seen[0].body["consent"]["terms_accepted"], true);
     assert!(seen[1]
@@ -702,7 +702,8 @@ fn parses_arguments_and_pack_quantity_semantics() {
     }
     let c = config("https://api.example.com");
     assert_eq!(c.selection(Some("five"), None).unwrap(), ("seat", 5));
-    assert_eq!(c.selection(Some("five"), Some(3)).unwrap(), ("seat", 3));
+    assert_eq!(c.selection(Some("five"), Some(3)).unwrap(), ("seat", 15));
+    assert!(c.selection(Some("five"), Some(2_001)).is_err());
     assert!(c.selection(Some("seat"), None).is_err());
     assert!(c.selection(Some("missing"), None).is_err());
 }
