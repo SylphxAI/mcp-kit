@@ -72,6 +72,17 @@ export async function github(repo, version, fetcher = fetch) {
   return value;
 }
 
+export function releaseCommit(version, release, exec = execFileSync) {
+  if (!release) return process.env.GITHUB_SHA;
+  const target = release.target_commitish;
+  if (typeof target === 'string' && /^[a-f0-9]{40}$/.test(target)) return target;
+  const tag = `v${version}`;
+  exec('git', ['fetch', '--no-tags', 'origin', `refs/tags/${tag}:refs/tags/${tag}`], { stdio: 'inherit' });
+  const commit = exec('git', ['rev-parse', `${tag}^{commit}`], { encoding: 'utf8' }).trim();
+  if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('release tag source is not a commit SHA');
+  return commit;
+}
+
 export async function image(name, version, fetcher = fetch, canonical, natives = {}, legacyComplete = false) {
   if (!name) return null;
   if (!name.startsWith('ghcr.io/') || !canonical) throw new Error('GHCR requires canonical release identity');
@@ -368,7 +379,7 @@ async function main() {
     for (const pkg of config.packages) packages.push(await npm(pkg.name, config.version));
     const release = await github(process.env.GITHUB_REPOSITORY, config.version);
     const mcp = await registry(process.env.MCP_NAME, config.version);
-    const { canonical, done } = await deliveryPlan(config, packages, release, mcp, { repository: process.env.GITHUB_REPOSITORY, commit: process.env.GITHUB_SHA, imageName: process.env.IMAGE || '', bundles: process.env.MCPB === 'true' });
+    const { canonical, done } = await deliveryPlan(config, packages, release, mcp, { repository: process.env.GITHUB_REPOSITORY, commit: releaseCommit(config.version, release), imageName: process.env.IMAGE || '', bundles: process.env.MCPB === 'true' });
     output('canonical', canonical.commit);
     output('version', config.version); output('dir', config.dir); output('cargo', config.cargo); output('publish', done.publish);
     for (const channel of ['npm', 'github', 'registry', 'docker']) output(`${channel}-missing`, !done[channel]);
