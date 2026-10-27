@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { KEYS, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, sameSource, deliveryPlan } from './release.mjs';
+import { KEYS, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, releaseCommit, sameSource, deliveryPlan } from './release.mjs';
 
 process.env.RELEASE_RETRY_MS = '0';
 const response = (status, value) => new Response(JSON.stringify(value), { status });
@@ -199,6 +199,31 @@ test('canonical source rejects empty, invalid and mixed revisions', () => {
   assert.throws(() => canonicalSource([{}], canonical), /invalid/);
   assert.throws(() => sameSource(canonical, { ...canonical, repository: 'other/tool' }), /mixed/);
 });
+test('existing releases build from the immutable tag source instead of newer main', () => {
+  const previous = process.env.GITHUB_SHA;
+  const main = 'a'.repeat(40);
+  const tag = 'b'.repeat(40);
+  process.env.GITHUB_SHA = main;
+  try {
+    assert.equal(releaseCommit('8.5.5', null), main);
+    assert.equal(releaseCommit('8.5.5', { target_commitish: tag }), tag);
+    const calls = [];
+    const exec = (...args) => {
+      calls.push(args);
+      return `${tag}\n`;
+    };
+    assert.equal(releaseCommit('8.5.5', { target_commitish: 'main' }, exec), tag);
+    assert.deepEqual(calls, [
+      ['git', ['fetch', '--no-tags', 'origin', 'refs/tags/v8.5.5:refs/tags/v8.5.5'], { stdio: 'inherit' }],
+      ['git', ['rev-parse', 'v8.5.5^{commit}'], { encoding: 'utf8' }],
+    ]);
+    assert.throws(() => releaseCommit('8.5.5', { target_commitish: 'main' }, () => 'not-a-sha'), /not a commit SHA/);
+  } finally {
+    if (previous === undefined) delete process.env.GITHUB_SHA;
+    else process.env.GITHUB_SHA = previous;
+  }
+});
+
 test('workflow keeps required build success and verifies replacement before retirement', () => {
   const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
   assert.match(workflow, /publish:\n    needs: \[check, build\]/);
