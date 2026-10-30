@@ -38,9 +38,17 @@ on:
         type: string
         required: true
       mcp-name:
-        description: 'MCP Registry name, e.g. io.github.SylphxAI/repomap (server.json at the repo root).'
+        description: 'Optional MCP Registry name; omit for a plain CLI release.'
         type: string
-        required: true
+        default: ''
+      platforms:
+        description: 'Space-separated native platform keys; empty selects all five supported targets.'
+        type: string
+        default: ''
+      version-arg:
+        description: 'Version command argument (version or --version).'
+        type: string
+        default: version
       cargo-package:
         type: string
         default: ''
@@ -116,6 +124,9 @@ on:
         type: string
         default: ''
     secrets:
+      NPM_TOKEN:
+        description: 'Optional existing npm token for bootstrapping unpublished packages; omit for trusted publishing.'
+        required: false
       TAP_APP_ID:
         description: 'GitHub App ID of an app with contents:write on the tap and bucket repositories only.'
         required: false
@@ -134,6 +145,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      matrix: ${{ steps.v.outputs.matrix }}
       canonical: ${{ steps.v.outputs.canonical }}
       version: ${{ steps.v.outputs.version }}
       publish: ${{ steps.v.outputs.publish }}
@@ -152,6 +164,15 @@ jobs:
           path: .mcp-kit
           sparse-checkout: scripts
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Verify an explicitly supplied npm credential
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > "$RUNNER_TEMP/npm-preflight.rc"
+            npm whoami --registry=https://registry.npmjs.org --userconfig "$RUNNER_TEMP/npm-preflight.rc"
+          fi
       - id: v
         env:
           GH_TOKEN: ${{ github.token }}
@@ -162,8 +183,10 @@ jobs:
           NATIVES: ${{ inputs.natives-dir }}
           ALIASES: ${{ inputs.alias-dirs }}
           MCP_NAME: ${{ inputs.mcp-name }}
+          VERSION_ARG: ${{ inputs.version-arg }}
           IMAGE: ${{ inputs.docker-image }}
           MCPB: ${{ inputs.mcpb }}
+          RELEASE_PLATFORMS: ${{ inputs.platforms }}
         run: node .mcp-kit/scripts/release.mjs plan
 
   build:
@@ -180,17 +203,13 @@ jobs:
       NATIVES: ${{ inputs.natives-dir }}
       ALIASES: ${{ inputs.alias-dirs }}
       MCP_NAME: ${{ inputs.mcp-name }}
+      RELEASE_PLATFORMS: ${{ inputs.platforms }}
+      VERSION_ARG: ${{ inputs.version-arg }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
       fail-fast: true
-      matrix:
-        include:
-          - { key: darwin-arm64, os: macos-latest, target: aarch64-apple-darwin }
-          - { key: darwin-x64, os: macos-latest, target: x86_64-apple-darwin }
-          - { key: linux-x64-gnu, os: ubuntu-latest, target: x86_64-unknown-linux-gnu, zig: '2.17' }
-          - { key: linux-arm64-gnu, os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zig: '2.17' }
-          - { key: win32-x64-msvc, os: windows-latest, target: x86_64-pc-windows-msvc, exe: '.exe' }
+      matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -228,9 +247,9 @@ jobs:
           set -euo pipefail
           node .mcp-kit/scripts/release.mjs cargo
           if [ -n "${{ matrix.zig }}" ]; then
-            cargo zigbuild --release --locked -p "$CARGO_PKG" --target ${{ matrix.target }}.${{ matrix.zig }}
+            cargo zigbuild --release --locked -p "$CARGO_PKG" --bin "$NAME" --target ${{ matrix.target }}.${{ matrix.zig }}
           else
-            cargo build --release --locked -p "$CARGO_PKG" --target ${{ matrix.target }}
+            cargo build --release --locked -p "$CARGO_PKG" --bin "$NAME" --target ${{ matrix.target }}
           fi
           mkdir -p out
           cp "target/${{ matrix.target }}/release/$BIN" out/
@@ -238,7 +257,7 @@ jobs:
           test "$actual_source" = "$CANONICAL_SHA"
           node .mcp-kit/scripts/release.mjs identity "${{ matrix.key }}"
       - name: Run it (native targets)
-        if: matrix.key != 'linux-arm64-gnu' && matrix.key != 'darwin-x64'
+        if: matrix.key != 'linux-arm64-gnu'
         shell: bash
         run: node .mcp-kit/scripts/release.mjs version "./out/${{ inputs.name }}${{ matrix.exe }}"
       - uses: actions/upload-artifact@v4
@@ -259,6 +278,8 @@ jobs:
       CANONICAL_SHA: ${{ needs.check.outputs.canonical }}
       GH_TOKEN: ${{ github.token }}
       MCP_NAME: ${{ inputs.mcp-name }}
+      RELEASE_PLATFORMS: ${{ inputs.platforms }}
+      VERSION_ARG: ${{ inputs.version-arg }}
       V: ${{ needs.check.outputs.version }}
       NAME: ${{ inputs.name }}
       PKG: ${{ inputs.npm-package }}
@@ -291,10 +312,18 @@ jobs:
           set -euo pipefail
           node .mcp-kit/scripts/release.mjs stage
           cp README.md LICENSE "$DIR/"
-      - name: Publish missing npm packages (trusted publishing)
+      - name: Publish missing npm packages
         if: needs.check.outputs.npm-missing == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            # npm reads the token from memory through this placeholder. Never log it.
+            printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > "$RUNNER_TEMP/npmrc"
+            export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc"
+            npm whoami --registry=https://registry.npmjs.org
+          fi
           pub() {
             local dir=$1 name
             name=$(node -p "require('./$dir/package.json').name")
@@ -336,10 +365,10 @@ jobs:
           . "$settle_lib"
           cd "$(mktemp -d)"
           # Packages are served (npm view); still retry registry-delay errors in npx.
-          actual=$(settle "npx $PKG@$V" npx -y "$PKG@$V" version)
+          actual=$(settle "npx $PKG@$V" npx -y "$PKG@$V" "$VERSION_ARG")
           test "$actual" = "$NAME $V"
           # A caller's smoke may source "$SETTLE_LIB" and run checks through `settle`.
-          if [ -n "$SMOKE" ]; then SETTLE_LIB="$settle_lib" bash -euo pipefail -c "$SMOKE"; else npx -y "$PKG@$V" version; fi
+          if [ -n "$SMOKE" ]; then SETTLE_LIB="$settle_lib" bash -euo pipefail -c "$SMOKE"; else npx -y "$PKG@$V" "$VERSION_ARG"; fi
       - name: MCP Bundles
         if: inputs.mcpb && needs.check.outputs.github-missing == 'true'
         env:
@@ -382,6 +411,7 @@ jobs:
         if: needs.check.outputs.registry-missing == 'true'
         env:
           MCP_NAME: ${{ inputs.mcp-name }}
+          VERSION_ARG: ${{ inputs.version-arg }}
         run: |
           set -euo pipefail
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
@@ -412,6 +442,8 @@ jobs:
       CANONICAL_SHA: ${{ needs.check.outputs.canonical }}
       GH_TOKEN: ${{ github.token }}
       MCP_NAME: ${{ inputs.mcp-name }}
+      RELEASE_PLATFORMS: ${{ inputs.platforms }}
+      VERSION_ARG: ${{ inputs.version-arg }}
       V: ${{ needs.check.outputs.version }}
       NAME: ${{ inputs.name }}
       IMAGE: ${{ inputs.docker-image }}
@@ -595,6 +627,7 @@ jobs:
       - name: Deprecate retired MCP Registry names
         env:
           MCP_NAME: ${{ inputs.mcp-name }}
+          VERSION_ARG: ${{ inputs.version-arg }}
           V: ${{ needs.check.outputs.version }}
           RETIRED: ${{ inputs.retired-mcp-names }}
           MESSAGE: ${{ inputs.retired-message }}

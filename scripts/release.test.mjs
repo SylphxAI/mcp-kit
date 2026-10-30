@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { KEYS, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, releaseCommit, sameSource, deliveryPlan } from './release.mjs';
+import { KEYS, releasePlatforms, buildMatrix, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, releaseCommit, sameSource, deliveryPlan } from './release.mjs';
 
 process.env.RELEASE_RETRY_MS = '0';
 const response = (status, value) => new Response(JSON.stringify(value), { status });
@@ -373,4 +373,53 @@ test('interrupted modern npm delivery before GitHub sidecars resumes using origi
     tarballs.set(packages[1].dist.tarball, Buffer.from('tampered'));
     await assert.rejects(deliveryPlan(config, packages, release, null, options, fetcher), /integrity mismatch/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('plain CLI manifests select only supported release targets without a registry entry', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'release-cli-'));
+  const keys = KEYS.filter((key) => !key.startsWith('win32'));
+  const write = (path, value) => { mkdirSync(join(root, path), { recursive: true }); writeFileSync(join(root, path, 'package.json'), JSON.stringify(value)); };
+  const main = { name: '@x/cli', version: '1.2.3', optionalDependencies: Object.fromEntries(keys.map((key) => [`@x/cli-${key}`, '1.2.3'])) };
+  const env = { NAME: 'cli', PKG: '@x/cli', RELEASE_PLATFORMS: keys.join(' '), VERSION_ARG: '--version' };
+  try {
+    for (const key of keys) write(`packages/npm/${key}`, { name: `@x/cli-${key}`, version: '1.2.3' });
+    write('packages/cli', main);
+    const config = manifests(env, root);
+    assert.deepEqual(config.keys, keys);
+    assert.equal(config.packages.length, 5);
+    assert.equal(buildMatrix(config.keys).include.some((target) => target.os === 'windows-latest'), false);
+    assert.equal(buildMatrix(config.keys).include.find((target) => target.key === 'darwin-x64').os, 'macos-26-intel');
+    const assets = requiredAssets('cli', '1.2.3', false, true, keys);
+    assert.equal(assets.length, 8);
+    assert.equal(assets.some((asset) => asset.includes('win32')), false);
+    const release = { assets: assets.map((name) => ({ name })) };
+    assert.equal(completion(config.packages, release, null, null, assets, false, false).publish, false);
+    assert.equal(completion(config.packages, release, null, null, assets, false).registry, false);
+    assert.throws(() => manifests({ ...env, MCP_NAME: 'io.github.x/cli' }, root), /server.json/);
+    assert.throws(() => manifests({ ...env, MCPB: 'true' }, root), /all five/);
+    assert.throws(() => manifests({ ...env, VERSION_ARG: 'wrong' }, root), /version argument/);
+    write('packages/cli', { ...main, optionalDependencies: { ...main.optionalDependencies, '@x/cli-win32-x64-msvc': '1.2.3' } });
+    assert.throws(() => manifests(env, root), /exactly the release platforms/);
+    write('packages/cli', main);
+    assert.throws(() => manifests({ ...env, RELEASE_PLATFORMS: '' }, root), /match the requested/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('release target selection rejects unknown, duplicate and empty selections', () => {
+  assert.deepEqual(releasePlatforms(), KEYS);
+  for (const value of ['windows-arm64', 'linux-x64-gnu linux-x64-gnu', ' ']) assert.throws(() => releasePlatforms(value), /invalid release platforms/);
+});
+
+
+test('a new Unix-only CLI plans its own artifacts and no unrequested registry', async () => {
+  const keys = KEYS.filter((key) => !key.startsWith('win32'));
+  const config = { name: 'cli', version: '1.2.3', keys, packages: keys.map((key) => ({ key, name: `@x/cli-${key}` })) };
+  const { canonical: source, done } = await deliveryPlan(config, Array(keys.length + 1).fill(null), null, null, { repository: canonical.repository, commit: canonical.commit, wantsRegistry: false });
+  assert.deepEqual(source, canonical);
+  assert.equal(done.registry, true);
+  assert.equal(done.docker, true);
+  assert.equal(done.npm, false);
+  assert.equal(done.github, false);
+  assert.equal(done.publish, true);
 });

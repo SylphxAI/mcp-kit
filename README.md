@@ -278,3 +278,9 @@ The manifest comes from `server.json` (title, description, website, arguments) a
 ## Releasing the kit
 
 Bump `version` in `Cargo.toml` and merge. `publish.yml` publishes the crate to crates.io, tags `vX.Y.Z` and moves `v0`, which the servers' release workflows use. A change to the release workflow reaches the servers only with a version bump.
+
+### Plain CLI releases
+
+The reusable release workflow also accepts plain CLIs. Omit `mcp-name` to skip the MCP Registry, set `platforms` to the supported native keys (space separated), and use `version-arg: --version` when needed. The native package directories and the launcher's optional dependencies must match that platform set exactly. An omitted platform set keeps the existing five-target release.
+
+For an unpublished npm package, pass the existing `NPM_TOKEN` secret by name for the first publication. Leave it unset for npm trusted publishing. The workflow never falls back to another credential after a failed publication. The same source identity, immutable archive and package recovery checks apply to both paths.
