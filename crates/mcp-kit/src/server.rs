@@ -3,8 +3,8 @@
 //! thread, and fetches the client's roots when the client offers them.
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, ListToolsResult,
+    PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt};
@@ -110,10 +110,17 @@ impl<A: App> ServerHandler for Handler<A> {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let tools = parse_tools(self.app.tools()).map_err(|e| McpError::internal_error(format!("bad tool definition: {e}"), None))?;
-        Ok(ListToolsResult::with_all_items(tools))
+        let result = ListToolsResult::with_all_items(tools);
+        // SEP-2549 requires these hints even when the list is not cached.
+        // Set them here too for consumers resolving the supported rmcp 3.4.
+        Ok(if context.protocol_version().is_some_and(|v| v.as_str() >= ProtocolVersion::V_2026_07_28.as_str()) {
+            result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
+        } else {
+            result
+        })
     }
 
     async fn call_tool(
