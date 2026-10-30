@@ -164,6 +164,15 @@ jobs:
           path: .mcp-kit
           sparse-checkout: scripts
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Verify an explicitly supplied npm credential
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > "$RUNNER_TEMP/npm-preflight.rc"
+            npm whoami --registry=https://registry.npmjs.org --userconfig "$RUNNER_TEMP/npm-preflight.rc"
+          fi
       - id: v
         env:
           GH_TOKEN: ${{ github.token }}
