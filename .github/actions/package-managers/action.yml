@@ -53,7 +53,10 @@ runs:
         [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.+-]+)?$ ]] || { echo '::error::invalid release version'; exit 1; }
         [ -n "$POLICY" ] && { [ -n "$TAP" ] || [ -n "$BUCKET" ]; } || { echo '::error::a policy and destination are required'; exit 1; }
         for repo in "$TAP" "$BUCKET"; do
-          [ -z "$repo" ] || [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo '::error::invalid destination repository'; exit 1; }
+          [ -z "$repo" ] || {
+            [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$ ]] &&
+              [ "${repo#*/}" != . ] && [ "${repo#*/}" != .. ]
+          } || { echo '::error::invalid destination repository'; exit 1; }
         done
     - name: Authorize Homebrew
       if: inputs.homebrew-tap != ''
