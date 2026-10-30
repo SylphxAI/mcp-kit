@@ -13,12 +13,13 @@ export function releasePlatforms(value = '') {
   if (!keys.length || new Set(keys).size !== keys.length || keys.some((key) => !KEYS.includes(key))) throw new Error('invalid release platforms');
   return keys;
 }
-export function buildMatrix(keys) {
+export function buildMatrix(keys, linuxGlibc = "2.17") {
+  if (!/^2\.\d+$/.test(linuxGlibc) || Number(linuxGlibc.split(".")[1]) < 17) throw new Error("invalid Linux glibc baseline");
   const targets = {
     'darwin-arm64': { os: 'macos-latest', target: 'aarch64-apple-darwin' },
     'darwin-x64': { os: 'macos-26-intel', target: 'x86_64-apple-darwin' },
-    'linux-x64-gnu': { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-gnu', zig: '2.17' },
-    'linux-arm64-gnu': { os: 'ubuntu-latest', target: 'aarch64-unknown-linux-gnu', zig: '2.17' },
+    'linux-x64-gnu': { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-gnu', zig: linuxGlibc },
+    'linux-arm64-gnu': { os: 'ubuntu-latest', target: 'aarch64-unknown-linux-gnu', zig: linuxGlibc },
     'win32-x64-msvc': { os: 'windows-latest', target: 'x86_64-pc-windows-msvc', exe: '.exe' },
   };
   return { include: keys.map((key) => ({ key, ...targets[key] })) };
@@ -402,7 +403,7 @@ async function main() {
     const release = await github(process.env.GITHUB_REPOSITORY, config.version);
     const mcp = process.env.MCP_NAME ? await registry(process.env.MCP_NAME, config.version) : null;
     const { canonical, done } = await deliveryPlan(config, packages, release, mcp, { repository: process.env.GITHUB_REPOSITORY, commit: releaseCommit(config.version, release), imageName: process.env.IMAGE || '', bundles: process.env.MCPB === 'true', wantsRegistry: Boolean(process.env.MCP_NAME) });
-    output('matrix', JSON.stringify(buildMatrix(config.keys)));
+    output('matrix', JSON.stringify(buildMatrix(config.keys, process.env.LINUX_GLIBC || "2.17")));
     output('canonical', canonical.commit);
     output('version', config.version); output('dir', config.dir); output('cargo', config.cargo); output('publish', done.publish);
     for (const channel of ['npm', 'github', 'registry', 'docker']) output(`${channel}-missing`, !done[channel]);

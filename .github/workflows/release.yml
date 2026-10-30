@@ -45,6 +45,10 @@ on:
         description: 'Space-separated native platform keys; empty selects all five supported targets.'
         type: string
         default: ''
+      linux-glibc:
+        description: 'Minimum glibc version for Linux native builds (2.17 or newer).'
+        type: string
+        default: '2.17'
       version-arg:
         description: 'Version command argument (version or --version).'
         type: string
@@ -187,6 +191,7 @@ jobs:
           IMAGE: ${{ inputs.docker-image }}
           MCPB: ${{ inputs.mcpb }}
           RELEASE_PLATFORMS: ${{ inputs.platforms }}
+          LINUX_GLIBC: ${{ inputs.linux-glibc }}
         run: node .mcp-kit/scripts/release.mjs plan
 
   build:

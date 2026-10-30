@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.4
+
+- Allow a CLI to declare its minimum Linux glibc version for release builds. Existing callers keep 2.17.
+
 ## 0.8.3
 
 - Use the CLI version argument when generating its Homebrew formula test.
