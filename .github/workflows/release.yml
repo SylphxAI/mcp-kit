@@ -520,6 +520,7 @@ jobs:
       V: ${{ needs.check.outputs.version }}
       TAP: ${{ inputs.homebrew && inputs.homebrew-tap || '' }}
       BUCKET: ${{ inputs.scoop && inputs.scoop-bucket || '' }}
+      VERSION_ARG: ${{ inputs.version-arg }}
     steps:
       - id: app
         env:
@@ -577,7 +578,7 @@ jobs:
           gh release download "v$V" --repo "$GITHUB_REPOSITORY" --dir dl --pattern "$NAME-*.tar.gz" --pattern "$NAME-*.zip"
           (cd dl && sha256sum -- * > ../SHA256SUMS)
           args=(--name "$NAME" --version "$V" --repo "$GITHUB_REPOSITORY" --sums SHA256SUMS
-            --description "$DESC" --homepage "$HOMEPAGE" --license "$LICENSE_ID")
+            --description "$DESC" --homepage "$HOMEPAGE" --license "$LICENSE_ID" --version-arg "$VERSION_ARG")
           if [ -f "$DIR/package.json" ]; then args+=(--package-json "$DIR/package.json"); fi
           if [ -n "$TAP" ]; then args+=(--formula-out "out/tap/Formula/$NAME.rb"); fi
           if [ -n "$BUCKET" ]; then args+=(--scoop-out "out/bucket/bucket/$NAME.json"); fi
