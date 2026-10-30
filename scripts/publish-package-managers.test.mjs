@@ -6,6 +6,10 @@ import { join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
 const script = resolve(import.meta.dirname, 'publish-package-managers.sh');
+const action = readFileSync(resolve(import.meta.dirname, '../.github/actions/package-managers/action.yml'), 'utf8');
+// Execute the action's cleanup command against the pinned Broker helper's
+// RUNNER_TEMP/broker-token artifact, including failures before publishing.
+const cleanup = action.match(/    - name: Remove temporary Broker token file\n      if: \$\{\{ always\(\) \}\}\n      shell: bash\n      run: (.+)\n?$/)?.[1];
 const git = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'package-manager-push-'));
@@ -42,7 +46,32 @@ done
   const env = { ...process.env, PATH: `${dir}/bin:${process.env.PATH}`, RUNNER_TEMP: join(dir, 'runner'), GITHUB_WORKSPACE: join(dir, 'source'), GITHUB_REPOSITORY: 'fixture/source', GH_TOKEN: 'fixture-source', NAME: 'tool', V: '1.2.3', TAP: 'fixture/tap', BUCKET: 'fixture/bucket', PACKAGE_JSON: '', DESC: 'Fixture', HOMEPAGE: '', LICENSE_ID: 'MIT', VERSION_ARG: 'version', TAP_TOKEN: 'fixture-tap', BUCKET_TOKEN: 'fixture-bucket' };
   const head = repo => execFileSync(git, ['--git-dir', join(dir, 'remotes/fixture', `${repo}.git`), 'rev-parse', 'main'], { encoding: 'utf8' }).trim();
   const run = overrides => spawnSync('bash', [script], { env: { ...env, ...overrides }, cwd: dir, encoding: 'utf8' });
-  return { dir, head, run };
+  const runAction = (overrides = {}, authorizationFailed = false) => {
+    assert.ok(cleanup, 'the final composite step must clean up even after an earlier failure');
+    // The helper can leave this file after either authorization step, before
+    // the publisher script has started and installed its own EXIT trap.
+    writeFileSync(join(env.RUNNER_TEMP, 'broker-token'), 'fixture-broker-token', { mode: 0o600 });
+    const result = authorizationFailed ? { status: 1 } : run(overrides);
+    const cleaned = spawnSync('bash', ['-euc', cleanup], { env, cwd: dir, encoding: 'utf8' });
+    assert.equal(cleaned.status, 0, cleaned.stderr);
+    return result;
+  };
+  return { dir, head, run, runAction };
+}
+
+for (const [name, override, authorizationFailed] of [
+  ['successful publication', {}, false],
+  ['publisher failure', { FAIL_DOWNLOAD: 'yes' }, false],
+  ['authorization failure before publication', {}, true],
+]) {
+  test(`composite removes the Broker helper file after ${name}`, t => {
+    const f = fixture(t);
+    const before = ['tap', 'bucket'].map(f.head);
+    const result = f.runAction(override, authorizationFailed);
+    assert.equal(result.status === 0, name === 'successful publication');
+    assert.deepEqual(readdirSync(join(f.dir, 'runner')), []);
+    if (result.status !== 0) assert.deepEqual(['tap', 'bucket'].map(f.head), before);
+  });
 }
 
 test('pushes rendered manifests with distinct credentials, preserves no-op heads, and cleans temporary credentials', t => {

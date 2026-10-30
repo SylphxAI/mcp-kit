@@ -93,3 +93,7 @@ runs:
         TAP_TOKEN: ${{ steps.tap-token.outputs.token }}
         BUCKET_TOKEN: ${{ steps.bucket-token.outputs.token }}
       run: bash "$GITHUB_ACTION_PATH/../../../scripts/publish-package-managers.sh"
+    - name: Remove temporary Broker token file
+      if: ${{ always() }}
+      shell: bash
+      run: rm -f "${RUNNER_TEMP:?}/broker-token"
