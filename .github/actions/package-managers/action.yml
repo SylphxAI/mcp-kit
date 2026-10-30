@@ -1,0 +1,99 @@
+name: Publish Homebrew and Scoop manifests
+description: >-
+  Publish manifests for an existing release through caller-job GitHub OIDC,
+  Access and the Broker. Run in a top-level job of the declared source workflow.
+inputs:
+  name:
+    description: Binary and formula/manifest name.
+    required: true
+  version:
+    description: Existing GitHub release version, without the v prefix.
+    required: true
+  trust-policy:
+    description: Existing Broker policy permitting contents write on the destinations only.
+    required: true
+  ci-name:
+    description: Access CI declaration for this caller workflow; defaults to the policy ID.
+    default: ''
+  homebrew-tap:
+    description: Homebrew repository, owner/name; empty disables Homebrew.
+    default: ''
+  scoop-bucket:
+    description: Scoop repository, owner/name; empty disables Scoop.
+    default: ''
+  package-json:
+    description: Optional package.json relative to the caller workspace for metadata defaults.
+    default: ''
+  description:
+    description: Package description, defaulting to package.json.
+    default: ''
+  homepage:
+    description: Package homepage, defaulting to package.json or source repository.
+    default: ''
+  license:
+    description: SPDX license, defaulting to package.json.
+    default: ''
+  version-arg:
+    description: CLI argument for the Homebrew formula test.
+    default: 'version'
+runs:
+  using: composite
+  steps:
+    - name: Validate release and destination inputs
+      shell: bash
+      env:
+        NAME: ${{ inputs.name }}
+        V: ${{ inputs.version }}
+        TAP: ${{ inputs.homebrew-tap }}
+        BUCKET: ${{ inputs.scoop-bucket }}
+        POLICY: ${{ inputs.trust-policy }}
+      run: |
+        set -euo pipefail
+        [[ "$NAME" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || { echo '::error::invalid package name'; exit 1; }
+        [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][a-zA-Z0-9.+-]+)?$ ]] || { echo '::error::invalid release version'; exit 1; }
+        [ -n "$POLICY" ] && { [ -n "$TAP" ] || [ -n "$BUCKET" ]; } || { echo '::error::a policy and destination are required'; exit 1; }
+        for repo in "$TAP" "$BUCKET"; do
+          [ -z "$repo" ] || {
+            [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$ ]] &&
+              [ "${repo#*/}" != . ] && [ "${repo#*/}" != .. ]
+          } || { echo '::error::invalid destination repository'; exit 1; }
+        done
+    - name: Authorize Homebrew
+      if: inputs.homebrew-tap != ''
+      id: tap-token
+      uses: SylphxAI/.github/.github/actions/broker-write-token@153916fe132a4de92b55c3f3fc220bc9fc6e44ec
+      with:
+        trust-policy: ${{ inputs.trust-policy }}
+        ci-name: ${{ inputs.ci-name }}
+        repository: ${{ inputs.homebrew-tap }}
+    - name: Authorize Scoop
+      if: inputs.scoop-bucket != ''
+      id: bucket-token
+      uses: SylphxAI/.github/.github/actions/broker-write-token@153916fe132a4de92b55c3f3fc220bc9fc6e44ec
+      with:
+        trust-policy: ${{ inputs.trust-policy }}
+        ci-name: ${{ inputs.ci-name }}
+        repository: ${{ inputs.scoop-bucket }}
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      with:
+        node-version: '24'
+    - name: Render and push manifests from existing release archives
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        NAME: ${{ inputs.name }}
+        V: ${{ inputs.version }}
+        TAP: ${{ inputs.homebrew-tap }}
+        BUCKET: ${{ inputs.scoop-bucket }}
+        PACKAGE_JSON: ${{ inputs.package-json }}
+        DESC: ${{ inputs.description }}
+        HOMEPAGE: ${{ inputs.homepage }}
+        LICENSE_ID: ${{ inputs.license }}
+        VERSION_ARG: ${{ inputs.version-arg }}
+        TAP_TOKEN: ${{ steps.tap-token.outputs.token }}
+        BUCKET_TOKEN: ${{ steps.bucket-token.outputs.token }}
+      run: bash "$GITHUB_ACTION_PATH/../../../scripts/publish-package-managers.sh"
+    - name: Remove temporary Broker token file
+      if: ${{ always() }}
+      shell: bash
+      run: rm -f "${RUNNER_TEMP:?}/broker-token"

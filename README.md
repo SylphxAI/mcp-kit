@@ -222,22 +222,31 @@ The workflow checks every requested delivery channel: all five native npm packag
 
 Opt in with one input each; the release then writes `Formula/<name>.rb` (macOS and Linux, arm64 and x86_64) to the tap and `bucket/<name>.json` (Windows x64, with `checkver` and `autoupdate`) to the bucket, from the digests of the release archives. It runs after the release, and again on a no-op run, so a missed update heals. Unchanged files are not committed.
 
+Run the shared composite action from a job in the source repository's own release workflow, after the reusable release job succeeds. Access verifies the source workflow authority; a job inside a cross-repository reusable workflow has a different authority and cannot use that declaration.
+
 ```yaml
-    with:
-      homebrew: true   # and/or scoop: true
-    secrets:
-      TAP_APP_ID: ${{ secrets.TAP_APP_ID }}
-      TAP_APP_PRIVATE_KEY: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+  package-managers:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: echo "value=$(node -p 'require("./packages/tool/package.json").version')" >> "$GITHUB_OUTPUT"
+      - uses: SylphxAI/mcp-kit/.github/actions/package-managers@v0
+        with:
+          name: tool
+          version: ${{ steps.version.outputs.value }}
+          package-json: packages/tool/package.json
+          trust-policy: orgs/<org>/trust_policies/<policy>
+          ci-name: <release-ci-declaration>
+          homebrew-tap: SylphxAI/homebrew-tap
+          scoop-bucket: SylphxAI/scoop-bucket
 ```
 
-| Input | Default |
-| --- | --- |
-| `homebrew`, `scoop` | `false` |
-| `homebrew-tap` | `SylphxAI/homebrew-tap` |
-| `scoop-bucket` | `SylphxAI/scoop-bucket` |
-| `description`, `homepage`, `license` | the main npm package's, then the GitHub repository for `homepage` |
+The Access declaration binds the source repository and owner numeric IDs, `.github/workflows/release.yml`, `refs/heads/main`, allowed events and the existing Access environment. Its only scope is `broker:exchange`. The Broker policy admits that workload principal and permits only **Contents: read and write** on the configured destinations. The action exchanges a separate one-repository token per destination; the company App key stays in the Broker. Missing authorization fails visibly. Adopt an immutable kit commit, disable `homebrew`/`scoop` on the reusable release call and remove its former `TAP_APP_ID`/`TAP_APP_PRIVATE_KEY` secret arguments. The deprecated secret inputs are ignored, and requesting package-manager publication inside the reusable workflow reports the required migration. Winget is not generated.
 
-Writing to another repository uses a GitHub App, never a token: create an org app with **Contents: read and write** on the tap and bucket repositories only, install it on those two, and store its ID and private key as org secrets `TAP_APP_ID` and `TAP_APP_PRIVATE_KEY` (visible to the server repositories). Pass them by name as above and never use `secrets: inherit`: it would hand the reusable workflow every caller secret, including publish tokens. Without the secrets the job skips with a notice and the release is unaffected. Tap and bucket must share one owner. Winget is not generated.
+The composite inputs `homebrew-tap` and `scoop-bucket` default to empty (disabled); supply either or both. `description`, `homepage`, `license` and `package-json` provide the renderer's metadata; `version-arg` defaults to `version`.
 
 Users: `brew install SylphxAI/tap/<name>`, `scoop bucket add sylphx https://github.com/SylphxAI/scoop-bucket && scoop install <name>`. The rendering lives in `scripts/package-managers.mjs`.
 

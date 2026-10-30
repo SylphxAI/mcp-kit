@@ -67,7 +67,7 @@ jobs:
       - name: MCP Bundles build, validate and run
         run: node --test scripts/mcpb.test.mjs
       - name: Homebrew formula and Scoop manifest
-        run: node --test scripts/package-managers.test.mjs
+        run: node --test scripts/package-managers.test.mjs scripts/publish-package-managers.test.mjs
 
   semver:
     # Standard hosted runners are free only for public repositories.
