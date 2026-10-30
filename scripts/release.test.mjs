@@ -423,3 +423,13 @@ test('a new Unix-only CLI plans its own artifacts and no unrequested registry', 
   assert.equal(done.github, false);
   assert.equal(done.publish, true);
 });
+
+
+test('Linux native builds honor the selected glibc baseline without changing other targets', () => {
+  const defaultMatrix = buildMatrix(KEYS).include;
+  const currentMatrix = buildMatrix(KEYS, '2.34').include;
+  for (const target of defaultMatrix.filter((target) => target.key.startsWith('linux'))) assert.equal(target.zig, '2.17');
+  for (const target of currentMatrix.filter((target) => target.key.startsWith('linux'))) assert.equal(target.zig, '2.34');
+  assert.deepEqual(currentMatrix.filter((target) => !target.key.startsWith('linux')), defaultMatrix.filter((target) => !target.key.startsWith('linux')));
+  for (const invalid of ['2.16', 'wrong', '2.34; echo wrong']) assert.throws(() => buildMatrix(KEYS, invalid), /invalid Linux glibc/);
+});
