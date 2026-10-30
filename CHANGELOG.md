@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.2
+
+- Release plain CLIs with a selected native platform set and a configurable version argument.
+- Allow an explicitly passed existing npm token to bootstrap unpublished packages. Existing callers continue to use trusted publishing.
+
 ## 0.8.1
 
 - Preserve the established pack-count contract: `--qty` multiplies the selected pack's seats (`--pack 5 --qty 2` buys 10 seats), with products above 10000 refused. This corrects the 0.8.0 quantity override.

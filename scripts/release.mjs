@@ -8,6 +8,21 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const KEYS = ['darwin-arm64', 'darwin-x64', 'linux-x64-gnu', 'linux-arm64-gnu', 'win32-x64-msvc'];
+export function releasePlatforms(value = '') {
+  const keys = value ? value.split(/\s+/).filter(Boolean) : [...KEYS];
+  if (!keys.length || new Set(keys).size !== keys.length || keys.some((key) => !KEYS.includes(key))) throw new Error('invalid release platforms');
+  return keys;
+}
+export function buildMatrix(keys) {
+  const targets = {
+    'darwin-arm64': { os: 'macos-latest', target: 'aarch64-apple-darwin' },
+    'darwin-x64': { os: 'macos-26-intel', target: 'x86_64-apple-darwin' },
+    'linux-x64-gnu': { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-gnu', zig: '2.17' },
+    'linux-arm64-gnu': { os: 'ubuntu-latest', target: 'aarch64-unknown-linux-gnu', zig: '2.17' },
+    'win32-x64-msvc': { os: 'windows-latest', target: 'x86_64-pc-windows-msvc', exe: '.exe' },
+  };
+  return { include: keys.map((key) => ({ key, ...targets[key] })) };
+}
 const json = (file) => JSON.parse(readFileSync(file, 'utf8'));
 const hash = (bytes, algorithm = 'sha256') => createHash(algorithm).update(bytes).digest();
 const encode = encodeURIComponent;
@@ -173,9 +188,13 @@ export function manifests(env = process.env, root = '.') {
   const natives = env.NATIVES || 'packages/npm';
   const main = json(join(root, dir, 'package.json'));
   if (main.name !== env.PKG) throw new Error('launcher package name does not match npm-package');
+  const keys = releasePlatforms(env.RELEASE_PLATFORMS);
+  if (env.VERSION_ARG && !['version', '--version'].includes(env.VERSION_ARG)) throw new Error('invalid version argument');
+  if (env.MCPB === 'true' && keys.length !== KEYS.length) throw new Error('MCP bundles require all five release platforms');
   const platforms = readdirSync(join(root, natives)).sort();
-  if (JSON.stringify(platforms) !== JSON.stringify([...KEYS].sort())) throw new Error('native packages must contain exactly the five release platforms');
-  const packages = KEYS.map((key) => ({ key, dir: `${natives}/${key}`, ...json(join(root, natives, key, 'package.json')) }));
+  if (JSON.stringify(platforms) !== JSON.stringify([...keys].sort())) throw new Error('native packages must match the requested release platforms');
+  const packages = keys.map((key) => ({ key, dir: `${natives}/${key}`, ...json(join(root, natives, key, 'package.json')) }));
+  if (JSON.stringify(Object.keys(main.optionalDependencies || {}).sort()) !== JSON.stringify(packages.map((p) => p.name).sort())) throw new Error('launcher must advertise exactly the release platforms');
   if (packages.some((p) => main.optionalDependencies?.[p.name] !== main.version)) throw new Error('launcher native dependency version mismatch');
   packages.push({ dir, ...main });
   for (const alias of (env.ALIASES || '').split(/\s+/).filter(Boolean)) {
@@ -184,13 +203,15 @@ export function manifests(env = process.env, root = '.') {
     packages.push({ dir: alias, ...value });
   }
   if (packages.some((p) => p.version !== main.version)) throw new Error('npm manifest version mismatch');
-  const server = json(join(root, 'server.json'));
-  if (server.name !== env.MCP_NAME || server.version !== main.version || !server.packages?.length || server.packages.some((p) => p.version !== main.version)) {
-    throw new Error('server.json identity mismatch');
+  if (env.MCP_NAME) {
+    const server = json(join(root, 'server.json'));
+    if (server.name !== env.MCP_NAME || server.version !== main.version || !server.packages?.length || server.packages.some((p) => p.version !== main.version)) {
+      throw new Error('server.json identity mismatch');
+    }
+    const launcher = server.packages.find((p) => p.registryType === 'npm' && p.identifier === main.name);
+    if (!launcher) throw new Error('server.json does not name the npm launcher');
   }
-  const launcher = server.packages.find((p) => p.registryType === 'npm' && p.identifier === main.name);
-  if (!launcher) throw new Error('server.json does not name the npm launcher');
-  return { name, version: main.version, dir, cargo: env.CARGO || name, packages };
+  return { name, version: main.version, dir, cargo: env.CARGO || name, packages, keys };
 }
 
 export function cargoIdentity(metadata, cargo, version) {
@@ -198,23 +219,24 @@ export function cargoIdentity(metadata, cargo, version) {
   if (selected.length !== 1 || selected[0].version !== version) throw new Error(`Cargo package ${cargo} must have version ${version}`);
 }
 
-export function requiredAssets(name, version, bundles, identities = true) {
-  return [...KEYS.flatMap((key) => [archive(name, key), ...(identities ? [`${name}-${key}.identity.json`] : [])]), ...(bundles ? [`${name}-${version}.mcpb`, ...KEYS.map((key) => `${name}-${version}-${key}.mcpb`)] : [])];
+export function requiredAssets(name, version, bundles, identities = true, keys = KEYS) {
+  return [...keys.flatMap((key) => [archive(name, key), ...(identities ? [`${name}-${key}.identity.json`] : [])]), ...(bundles ? [`${name}-${version}.mcpb`, ...keys.map((key) => `${name}-${version}-${key}.mcpb`)] : [])];
 }
 
-export function completion(packages, release, mcp, docker, wantedAssets, wantsDocker) {
+export function completion(packages, release, mcp, docker, wantedAssets, wantsDocker, wantsRegistry = true) {
   const assets = new Set(release?.assets.map((a) => a.name) || []);
   const npmDone = packages.every(Boolean);
   const githubDone = Boolean(release) && wantedAssets.every((a) => assets.has(a));
-  const registryDone = Boolean(mcp);
+  const registryDone = !wantsRegistry || Boolean(mcp);
   const dockerDone = !wantsDocker || Boolean(docker);
   return { npm: npmDone, github: githubDone, registry: registryDone, docker: dockerDone,
     publish: !npmDone || !githubDone || !registryDone || !dockerDone };
 }
 
-export async function deliveryPlan(config, packages, release, mcp, { repository, commit, imageName = '', bundles = false }, fetcher = fetch) {
+export async function deliveryPlan(config, packages, release, mcp, { repository, commit, imageName = '', bundles = false, wantsRegistry = true }, fetcher = fetch) {
+  const keys = config.keys || KEYS;
   const sources = [], nativeIdentities = {};
-  for (const key of KEYS) {
+  for (const key of keys) {
     const identity = await sidecar(release, config.name, key, fetcher);
     if (identity) {
       if (identity.name !== config.name || identity.version !== config.version || identity.platform !== key || !/^[a-f0-9]{64}$/.test(identity.sha256)) throw new Error('original platform identity mismatch');
@@ -230,8 +252,8 @@ export async function deliveryPlan(config, packages, release, mcp, { repository,
   const canonical = canonicalSource(sources, { repository, commit });
   let legacy = Boolean(release) && Object.keys(nativeIdentities).length === 0;
   const hydrate = async () => {
-    for (const key of KEYS) {
-      const published = packages[KEYS.indexOf(key)];
+    for (const key of keys) {
+      const published = packages[keys.indexOf(key)];
       if (!nativeIdentities[key] && published) {
         const pkg = config.packages?.find((p) => p.key === key) || published;
         const { identity } = await npmNative(config, key, pkg, published, canonical, fetcher);
@@ -241,7 +263,7 @@ export async function deliveryPlan(config, packages, release, mcp, { repository,
     if (!Object.keys(nativeIdentities).length) throw new Error('legacy partial release lacks original identities; requested channel recovery requires verified provenance');
     legacy = false;
   };
-  const beforeImage = completion(packages, release, mcp, null, requiredAssets(config.name, config.version, bundles, !legacy), false);
+  const beforeImage = completion(packages, release, mcp, null, requiredAssets(config.name, config.version, bundles, !legacy, keys), false, wantsRegistry);
   // Missing GitHub sidecars do not establish legacy provenance: npm may already
   // carry original identities from an interrupted modern publication.
   if (beforeImage.publish && (legacy || packages.some(Boolean))) await hydrate();
@@ -250,7 +272,7 @@ export async function deliveryPlan(config, packages, release, mcp, { repository,
     await hydrate();
     docker = await image(imageName, config.version, fetcher, canonical, nativeIdentities);
   }
-  const done = completion(packages, release, mcp, docker, requiredAssets(config.name, config.version, bundles, !legacy), Boolean(imageName));
+  const done = completion(packages, release, mcp, docker, requiredAssets(config.name, config.version, bundles, !legacy, keys), Boolean(imageName), wantsRegistry);
   return { canonical, done, legacy };
 }
 
@@ -378,8 +400,9 @@ async function main() {
     const packages = [];
     for (const pkg of config.packages) packages.push(await npm(pkg.name, config.version));
     const release = await github(process.env.GITHUB_REPOSITORY, config.version);
-    const mcp = await registry(process.env.MCP_NAME, config.version);
-    const { canonical, done } = await deliveryPlan(config, packages, release, mcp, { repository: process.env.GITHUB_REPOSITORY, commit: releaseCommit(config.version, release), imageName: process.env.IMAGE || '', bundles: process.env.MCPB === 'true' });
+    const mcp = process.env.MCP_NAME ? await registry(process.env.MCP_NAME, config.version) : null;
+    const { canonical, done } = await deliveryPlan(config, packages, release, mcp, { repository: process.env.GITHUB_REPOSITORY, commit: releaseCommit(config.version, release), imageName: process.env.IMAGE || '', bundles: process.env.MCPB === 'true', wantsRegistry: Boolean(process.env.MCP_NAME) });
+    output('matrix', JSON.stringify(buildMatrix(config.keys)));
     output('canonical', canonical.commit);
     output('version', config.version); output('dir', config.dir); output('cargo', config.cargo); output('publish', done.publish);
     for (const channel of ['npm', 'github', 'registry', 'docker']) output(`${channel}-missing`, !done[channel]);
@@ -393,9 +416,9 @@ async function main() {
     const key = args[0], file = join('out', binary(config.name, key));
     writeFileSync(join('out', 'identity.json'), JSON.stringify(nativeIdentity(config.name, config.version, key, readFileSync(file), sourceIdentity({ repository: process.env.GITHUB_REPOSITORY, commit: process.env.CANONICAL_SHA }))));
   } else if (command === 'version') {
-    verifyVersion(execFileSync(args[0], ['version'], { encoding: 'utf8' }), config.name, config.version);
+    verifyVersion(execFileSync(args[0], [process.env.VERSION_ARG || 'version'], { encoding: 'utf8' }), config.name, config.version);
   } else if (command === 'stage') {
-    for (const key of args.length ? args : KEYS) {
+    for (const key of args.length ? args : config.keys) {
       const source = join('artifacts', `native-${key}`), bytes = readFileSync(join(source, binary(config.name, key)));
       const identity = json(join(source, 'identity.json'));
       verifyNative(identity, config.name, config.version, key, bytes, { repository: process.env.GITHUB_REPOSITORY, commit: process.env.CANONICAL_SHA });
