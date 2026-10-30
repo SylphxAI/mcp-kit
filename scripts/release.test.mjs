@@ -410,3 +410,16 @@ test('release target selection rejects unknown, duplicate and empty selections',
   assert.deepEqual(releasePlatforms(), KEYS);
   for (const value of ['windows-arm64', 'linux-x64-gnu linux-x64-gnu', ' ']) assert.throws(() => releasePlatforms(value), /invalid release platforms/);
 });
+
+
+test('a new Unix-only CLI plans its own artifacts and no unrequested registry', async () => {
+  const keys = KEYS.filter((key) => !key.startsWith('win32'));
+  const config = { name: 'cli', version: '1.2.3', keys, packages: keys.map((key) => ({ key, name: `@x/cli-${key}` })) };
+  const { canonical: source, done } = await deliveryPlan(config, Array(keys.length + 1).fill(null), null, null, { repository: canonical.repository, commit: canonical.commit, wantsRegistry: false });
+  assert.deepEqual(source, canonical);
+  assert.equal(done.registry, true);
+  assert.equal(done.docker, true);
+  assert.equal(done.npm, false);
+  assert.equal(done.github, false);
+  assert.equal(done.publish, true);
+});
