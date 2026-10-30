@@ -67,3 +67,11 @@ test("CLI writes both files, metadata defaults from package.json", () => {
   assert.match(f, /homepage "https:\/\/github.com\/SylphxAI\/my-tool"/);
   assert.equal(JSON.parse(readFileSync(join(d, "bucket/tool.json"), "utf8")).license, "Apache-2.0");
 });
+
+
+test('formula checks use the CLI version argument and reject unknown arguments', () => {
+  const meta = { name: 'tool', version: '1.2.3', repo: 'x/tool', sums: Object.fromEntries(['darwin-arm64', 'darwin-x64', 'linux-arm64-gnu', 'linux-x64-gnu'].map((key) => [`tool-${key}.tar.gz`, 'a'.repeat(64)])), description: 'A tool', homepage: 'https://github.com/x/tool', license: 'MIT' };
+  assert.match(formula({ ...meta, versionArg: '--version' }), /tool --version/);
+  assert.match(formula(meta), /tool version/);
+  assert.throws(() => formula({ ...meta, versionArg: 'wrong' }), /invalid version argument/);
+});

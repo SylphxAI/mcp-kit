@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3
+
+- Use the CLI version argument when generating its Homebrew formula test.
+
 ## 0.8.2
 
 - Release plain CLIs with a selected native platform set and a configurable version argument.
