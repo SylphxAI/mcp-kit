@@ -160,7 +160,14 @@ jobs:
     # superseded run held the next one (SylphxAI/agents#4222, 2026-10-02).
     runs-on: sylphx-linux-control
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
-      - uses: SylphxAI/.github/.github/actions/needs-pass@46ec433892bca8693193049b5ee7441bb916a7ad # main
+      - uses: SylphxAI/.github/.github/actions/needs-pass@96195d86b550ab1205159acb1ae0d75b1fbed47f # main
         with:
           needs: ${{ toJSON(needs) }}
+          required: >-
+            other-os,
+            ${{ (github.event_name != 'merge_group') && 'test,identifiers' || '' }},
+            ${{ (github.event_name == 'merge_group' || github.event.repository.private == false) && 'semver,chat-senders' || '' }}
