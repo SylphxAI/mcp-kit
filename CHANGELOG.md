@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.9
+
+- Recover a new package-manager pull request whose mergeability changes to clean while auto-merge is being enabled. Re-read its exact head and state before one ordinary merge request; unrelated failures and changed heads still stop publication.
+
 ## 0.8.6
 
 - Add a package-managers composite action for Homebrew and Scoop writes through caller-job GitHub OIDC, Access and Broker, with one repository token per destination. The reusable workflow reports the migration and ignores its deprecated App-key inputs.
