@@ -70,7 +70,29 @@ publish_to() {
       number=$(jq -r '.[0].number' "$work/prs.json")
     fi
     # GitHub applies the destination's checks and merge queue. Never use admin.
-    gh pr merge "$number" --repo "$repo" --auto --squash --match-head-commit "$head"
+    if gh pr merge "$number" --repo "$repo" --auto --squash --match-head-commit "$head" 2> "$work/arm-error"; then
+      cat "$work/arm-error" >&2
+    else
+      status=$?
+      cat "$work/arm-error" >&2
+      # A new PR can become CLEAN after gh selected enableAutoMerge from an
+      # UNKNOWN snapshot. GitHub then refuses that mutation without arming it.
+      # Only this explicit refusal permits one refreshed, normal merge request.
+      grep -Fq 'is in clean status (enablePullRequestAutoMerge)' "$work/arm-error" || exit "$status"
+      gh pr view "$number" --repo "$repo" --json state,headRefOid,mergeStateStatus > "$work/arm-pr.json"
+      [ "$(jq -r '.headRefOid' "$work/arm-pr.json")" = "$head" ] || {
+        echo "::error::publication PR head changed in $repo"; exit 1;
+      }
+      state=$(jq -r '.state' "$work/arm-pr.json")
+      if [ "$state" != MERGED ]; then
+        if [ "$state" != OPEN ] || [ "$(jq -r '.mergeStateStatus' "$work/arm-pr.json")" != CLEAN ]; then
+          echo "::error::publication PR is not clean after auto-merge refusal in $repo"; exit 1
+        fi
+        # No --auto on a confirmed CLEAN PR: use the ordinary merge/queue
+        # operation. GitHub still enforces all current destination requirements.
+        gh pr merge "$number" --repo "$repo" --squash --match-head-commit "$head"
+      fi
+    fi
     wait_seconds=${PACKAGE_MANAGERS_WAIT_SECONDS:-900}
     poll_seconds=${PACKAGE_MANAGERS_POLL_SECONDS:-10}
     [[ "$wait_seconds" =~ ^[0-9]+$ && "$poll_seconds" =~ ^[0-9]+$ ]] || exit 1

@@ -73,7 +73,27 @@ else if (args[0] === 'pr' && args[1] === 'create') {
 }
 else if (args[0] === 'pr' && args[1] === 'merge') {
   const pr = state();
-  if (value('--match-head-commit') !== pr.headRefOid || !args.includes('--auto') || !args.includes('--squash')) process.exit(92);
+  if (value('--match-head-commit') !== pr.headRefOid || !args.includes('--squash') || args.includes('--admin')) process.exit(92);
+  pr.mergeAttempts = (pr.mergeAttempts || 0) + 1;
+  writeFileSync(stateFile, JSON.stringify(pr));
+  if (process.env.ARM_FAILURE === 'auth') { console.error('GraphQL: Resource not accessible by integration'); process.exit(1); }
+  if (process.env.ARM_FAILURE === 'clean-direct-failure' && !args.includes('--auto')) {
+    console.error('GraphQL: ordinary merge refused'); process.exit(1);
+  }
+  if (process.env.ARM_FAILURE?.startsWith('clean') && args.includes('--auto')) {
+    if (process.env.ARM_FAILURE === 'clean-closed') {
+      pr.state = 'CLOSED'; writeFileSync(stateFile, JSON.stringify(pr));
+    }
+    if (process.env.ARM_FAILURE === 'clean-merged') {
+      pr.state = 'MERGED';
+      git('--git-dir', remote, 'update-ref', 'refs/heads/main', pr.headRefOid);
+      pr.mergeCommit = { oid: pr.headRefOid };
+      writeFileSync(stateFile, JSON.stringify(pr));
+    }
+    console.error('GraphQL: Pull request Pull request is in clean status (enablePullRequestAutoMerge)');
+    process.exit(1);
+  }
+  if (!args.includes('--auto') && !process.env.ARM_FAILURE?.startsWith('clean')) process.exit(92);
   pr.state = process.env.PR_OUTCOME === 'closed' ? 'CLOSED' : process.env.PR_OUTCOME === 'pending' ? 'OPEN' : 'MERGED';
   if (pr.state === 'MERGED') {
     git('--git-dir', remote, 'update-ref', 'refs/heads/main', pr.headRefOid);
@@ -83,7 +103,8 @@ else if (args[0] === 'pr' && args[1] === 'merge') {
 }
 else if (args[0] === 'pr' && args[1] === 'view') {
   const pr = state();
-  if (process.env.CHANGED_HEAD === 'yes') pr.headRefOid = 'unexpected';
+  if (process.env.CHANGED_HEAD === 'yes' || process.env.ARM_FAILURE === 'clean-changed-head') pr.headRefOid = 'unexpected';
+  pr.mergeStateStatus = process.env.ARM_FAILURE === 'clean-blocked' ? 'BLOCKED' : 'CLEAN';
   emit(pr);
 }
 else if (args[0] === 'api') {
@@ -183,4 +204,45 @@ test('a pending PR receives a corrected manifest through a fast-forward update',
   assert.equal(result.status, 0, result.stderr);
   assert.equal(f.pr('tap').number, first.number);
   assert.notEqual(f.pr('tap').headRefOid, first.headRefOid);
+});
+
+for (const [failure, attempts] of [['clean', 2], ['clean-merged', 1]]) {
+  test(`a new PR's clean-status auto-merge race recovers safely (${failure})`, t => {
+    const f = fixture(t);
+    const result = f.run({ ARM_FAILURE: failure });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    for (const repo of ['tap', 'bucket']) {
+      assert.equal(f.pr(repo).state, 'MERGED');
+      assert.equal(f.pr(repo).mergeAttempts, attempts);
+    }
+    assert.deepEqual(readdirSync(join(f.dir, 'runner')), []);
+  });
+}
+for (const [failure, reason] of [
+  ['auth', /Resource not accessible/],
+  ['clean-changed-head', /PR head changed/],
+  ['clean-blocked', /not clean/],
+  ['clean-closed', /not clean/],
+]) {
+  test(`an arm failure cannot bypass or repeat unsafe state (${failure})`, t => {
+    const f = fixture(t);
+    const before = ['tap', 'bucket'].map(f.head);
+    const result = f.run({ ARM_FAILURE: failure });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, reason);
+    assert.equal(f.pr('tap').mergeAttempts, 1);
+    assert.deepEqual(['tap', 'bucket'].map(f.head), before);
+    assert.deepEqual(readdirSync(join(f.dir, 'runner')), []);
+  });
+}
+
+test('a refused ordinary merge is not repeated', t => {
+  const f = fixture(t);
+  const before = ['tap', 'bucket'].map(f.head);
+  const result = f.run({ ARM_FAILURE: 'clean-direct-failure' });
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stderr, /ordinary merge refused/);
+  assert.equal(f.pr('tap').mergeAttempts, 2);
+  assert.deepEqual(['tap', 'bucket'].map(f.head), before);
+  assert.deepEqual(readdirSync(join(f.dir, 'runner')), []);
 });
