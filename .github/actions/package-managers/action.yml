@@ -10,7 +10,7 @@ inputs:
     description: Existing GitHub release version, without the v prefix.
     required: true
   trust-policy:
-    description: Existing Broker policy permitting contents write on the destinations only.
+    description: Existing Broker policy permitting contents and pull requests write on the destinations only.
     required: true
   ci-name:
     description: Access CI declaration for this caller workflow; defaults to the policy ID.
@@ -77,7 +77,7 @@ runs:
     - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
       with:
         node-version: '24'
-    - name: Render and push manifests from existing release archives
+    - name: Publish manifests through destination pull requests
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
