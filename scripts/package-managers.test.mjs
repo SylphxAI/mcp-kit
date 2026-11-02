@@ -75,3 +75,9 @@ test('formula checks use the CLI version argument and reject unknown arguments',
   assert.match(formula(meta), /tool version/);
   assert.throws(() => formula({ ...meta, versionArg: 'wrong' }), /invalid version argument/);
 });
+
+test('Homebrew descriptions omit a final full stop while Scoop preserves prose', () => {
+  const description = 'A useful tool. ';
+  assert.match(formula({ ...meta, description, sums }), /desc "A useful tool"/);
+  assert.equal(JSON.parse(scoop({ ...meta, description, sums })).description, description);
+});

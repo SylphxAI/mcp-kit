@@ -55,7 +55,13 @@ if (!['fixture/tap', 'fixture/bucket'].includes(repo)) process.exit(90);
 if (process.env.GH_TOKEN !== 'fixture-' + repo.split('/')[1]) process.exit(89);
 const remote = ${JSON.stringify(dir)} + '/remotes/' + repo + '.git';
 const stateFile = remote + '/pr.json';
-const state = () => { try { return JSON.parse(readFileSync(stateFile)); } catch { return null; } };
+const state = () => {
+  try {
+    const pr = JSON.parse(readFileSync(stateFile));
+    if (pr.state === 'OPEN') pr.headRefOid = git('--git-dir', remote, 'rev-parse', pr.headRefName);
+    return pr;
+  } catch { return null; }
+};
 const emit = data => process.stdout.write(JSON.stringify(data) + '\n');
 if (args[0] === 'pr' && args[1] === 'list') { const pr = state(); emit(pr ? [pr] : []); }
 else if (args[0] === 'pr' && args[1] === 'create') {
@@ -167,4 +173,14 @@ test('a pending PR resumes without a duplicate branch or PR', t => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(f.pr('tap').headRefOid, first.headRefOid);
   assert.equal(f.pr('tap').number, first.number);
+});
+
+test('a pending PR receives a corrected manifest through a fast-forward update', t => {
+  const f = fixture(t);
+  assert.notEqual(f.run({ PR_OUTCOME: 'pending', DESC: 'Original description' }).status, 0);
+  const first = f.pr('tap');
+  const result = f.run({ DESC: 'Corrected description.' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(f.pr('tap').number, first.number);
+  assert.notEqual(f.pr('tap').headRefOid, first.headRefOid);
 });
