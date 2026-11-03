@@ -132,7 +132,7 @@ test('fresh recovery uses exact npm artifacts when old GitHub assets lack digest
     writeFileSync(join(root, 'package/tool'), bytes);
     writeFileSync(join(root, 'package/identity.json'), JSON.stringify(nativeIdentity('tool', '1.2.3', 'linux-arm64-gnu', bytes, canonical)));
     writeFileSync(join(root, 'package/package.json'), JSON.stringify({ name: '@x/tool-native', version: '1.2.3' }));
-    execFileSync('tar', ['-czf', join(root, 'native.tgz'), '-C', root, 'package']);
+    execFileSync('tar', ['-czf', 'native.tgz', 'package'], { cwd: root });
     const tarball = readFileSync(join(root, 'native.tgz'));
     const value = { ...npmValue, gitHead: canonical.commit, name: '@x/tool-native', dist: { tarball: 'https://registry.npmjs.org/native.tgz', integrity: `sha512-${createHash('sha512').update(tarball).digest('base64')}` } };
     const config = { source: canonical, name: 'tool', version: '1.2.3', packages: [{ key: 'linux-arm64-gnu', name: value.name }] };
@@ -146,7 +146,7 @@ test('fresh recovery uses exact npm artifacts when old GitHub assets lack digest
     assert.deepEqual(readFileSync(join(out, 'tool')), bytes);
     verifyNative(JSON.parse(readFileSync(join(out, 'identity.json'))), 'tool', '1.2.3', 'linux-arm64-gnu', bytes);
     await assert.rejects(recover(config, 'linux-arm64-gnu', out, async (url) => url === value.dist.tarball ? new Response('wrong bytes') : fetcher(url)), /integrity mismatch/);
-    execFileSync('tar', ['-czf', join(root, 'github.tar.gz'), '-C', join(root, 'package'), 'tool']);
+    execFileSync('tar', ['-czf', '../github.tar.gz', 'tool'], { cwd: join(root, 'package') });
     const githubBytes = readFileSync(join(root, 'github.tar.gz'));
     const originalIdentity = Buffer.from(JSON.stringify(nativeIdentity('tool', '1.2.3', 'linux-arm64-gnu', bytes, canonical)));
     const identityAsset = { name: 'tool-linux-arm64-gnu.identity.json', url: 'https://api.github.com/identity', digest: `sha256:${createHash('sha256').update(originalIdentity).digest('hex')}` };
@@ -163,6 +163,43 @@ test('fresh recovery uses exact npm artifacts when old GitHub assets lack digest
     assert.equal(await recover(config, 'linux-arm64-gnu', out, async () => response(404, {})), false, 'only confirmed absence permits a new build');
     await assert.rejects(recover(config, 'linux-arm64-gnu', out, async () => response(503, {})), /release probe failed/);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test('npm native recovery keeps drive letters and spaces out of tar archive arguments', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'release-paths-'));
+  const temporary = process.platform === 'win32' ? join(root, 'archive space') : 'C: archive space';
+  const cwd = process.cwd();
+  const saved = Object.fromEntries(['TMPDIR', 'TMP', 'TEMP'].map((key) => [key, process.env[key]]));
+  try {
+    process.chdir(root);
+    mkdirSync(temporary);
+    mkdirSync(join(root, 'package'));
+    for (const key of KEYS) {
+      const file = key.startsWith('win32') ? 'tool.exe' : 'tool';
+      const bytes = Buffer.from(`fixture ${key}`);
+      const identity = nativeIdentity('tool', '1.2.3', key, bytes, canonical);
+      writeFileSync(join(root, 'package', file), bytes);
+      writeFileSync(join(root, 'package/identity.json'), JSON.stringify(identity));
+      writeFileSync(join(root, 'package/package.json'), JSON.stringify({ name: '@x/tool-native', version: '1.2.3' }));
+      execFileSync('tar', ['-czf', 'native.tgz', 'package'], { cwd: root });
+      const tarball = readFileSync(join(root, 'native.tgz'));
+      const value = { ...npmValue, name: '@x/tool-native', gitHead: canonical.commit,
+        dist: { tarball: 'https://fixture.test/native.tgz', integrity: `sha512-${createHash('sha512').update(tarball).digest('base64')}` } };
+      const fetcher = async (url) => url === value.dist.tarball ? new Response(tarball)
+        : url.startsWith('https://api.github.com/') ? response(404, {}) : response(200, value);
+      for (const name of Object.keys(saved)) process.env[name] = temporary;
+      const out = join(root, 'out', key);
+      assert.equal(await recover({ name: 'tool', version: '1.2.3', source: canonical,
+        packages: [{ key, name: value.name }] }, key, out, fetcher), true);
+      assert.deepEqual(readFileSync(join(out, file)), bytes);
+      assert.deepEqual(JSON.parse(readFileSync(join(out, 'identity.json'))), identity);
+    }
+  } finally {
+    process.chdir(cwd);
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 test('GHCR validates digest-addressed configs against canonical native identities', async () => {
   const natives = Object.fromEntries(['linux-x64-gnu', 'linux-arm64-gnu'].map((key) => [key, { sha256: 'f'.repeat(64) }]));
@@ -332,7 +369,7 @@ test('interrupted modern npm delivery before GitHub sidecars resumes using origi
     writeFileSync(join(path, 'package', key.startsWith('win32') ? 'anymd.exe' : 'anymd'), bytes);
     writeFileSync(join(path, 'package/package.json'), JSON.stringify(pkg));
     if (withIdentity) writeFileSync(join(path, 'package/identity.json'), JSON.stringify(nativeIdentity(name, version, key, bytes, source)));
-    execFileSync('tar', ['-czf', join(path, 'native.tgz'), '-C', path, 'package']);
+    execFileSync('tar', ['-czf', 'native.tgz', 'package'], { cwd: path });
     const tarball = readFileSync(join(path, 'native.tgz'));
     const url = `https://fixture.test/${key}.tgz`;
     tarballs.set(url, tarball);

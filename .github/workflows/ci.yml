@@ -58,8 +58,6 @@ jobs:
           cp npm/launcher.js "$d/pkg/bin/tool.js"
           set +e; out=$(NODE_PATH="$d/node_modules" node "$d/pkg/bin/tool.js" a b); code=$?; set -e
           test "$out" = "tool a b" && test "$code" = 3
-      - name: Release planning and identity (offline)
-        run: node --test scripts/release.test.mjs
       - name: npm propagation wait (offline)
         run: bash scripts/npm-settle.test.sh
       - name: Registry retry (offline)
@@ -68,6 +66,22 @@ jobs:
         run: node --test scripts/mcpb.test.mjs
       - name: Homebrew formula and Scoop manifest
         run: node --test scripts/package-managers.test.mjs scripts/publish-package-managers.test.mjs
+
+  release-recovery:
+    if: github.event_name != 'merge_group' && github.event.repository.private == false
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Release planning and native recovery (offline)
+        run: node --test scripts/release.test.mjs
 
   semver:
     # Standard hosted runners are free only for public repositories.

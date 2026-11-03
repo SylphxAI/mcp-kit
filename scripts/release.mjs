@@ -311,12 +311,14 @@ async function npmNative(config, key, pkg, published, canonical, fetcher) {
     verifyIntegrity(data, published.dist.integrity);
     const file = join(temporary, 'native.tgz');
     writeFileSync(file, data);
-    const manifest = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/package.json'], { encoding: 'utf8' }));
+    // A drive-letter path is a remote archive to GNU tar. A local basename
+    // plus cwd also works with BSD tar; --force-local is GNU-only.
+    const manifest = JSON.parse(execFileSync('tar', ['-xOzf', 'native.tgz', 'package/package.json'], { cwd: temporary, encoding: 'utf8' }));
     if (manifest.name !== pkg.name || manifest.version !== config.version) throw new Error('recovered npm manifest identity mismatch');
-    bytes = execFileSync('tar', ['-xOzf', file, `package/${binary(config.name, key)}`], { maxBuffer: 512 * 1024 * 1024 });
+    bytes = execFileSync('tar', ['-xOzf', 'native.tgz', `package/${binary(config.name, key)}`], { cwd: temporary, maxBuffer: 512 * 1024 * 1024 });
     // Preserve original identity carried in the signed package, never label
     // downloaded bytes with a requested version or current checkout.
-    try { identity = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/identity.json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })); }
+    try { identity = JSON.parse(execFileSync('tar', ['-xOzf', 'native.tgz', 'package/identity.json'], { cwd: temporary, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })); }
     catch { throw new Error('legacy partial release: npm binary lacks original build identity; verified provenance migration required'); }
     if (published.gitHead !== identity.source?.commit) throw new Error('npm gitHead differs from original build source');
     verifyNative(identity, config.name, config.version, key, bytes, canonical);
@@ -347,7 +349,7 @@ export async function recover(config, key, out, fetcher = fetch) {
       writeFileSync(file, data);
       bytes = key.startsWith('win32')
         ? execFileSync('unzip', ['-p', file, binary(config.name, key)], { maxBuffer: 512 * 1024 * 1024 })
-        : execFileSync('tar', ['-xOzf', file, binary(config.name, key)], { maxBuffer: 512 * 1024 * 1024 });
+        : execFileSync('tar', ['-xOzf', 'native.tar.gz', binary(config.name, key)], { cwd: temporary, maxBuffer: 512 * 1024 * 1024 });
       identity = original;
       if (!identity) throw new Error('legacy GitHub binary lacks original verified build identity; recover from proven npm package instead');
     } else {
