@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.10
+
+- Recover native packages on Windows without treating drive letters as remote tar hosts. Extract archives from a local filename and keep original source, integrity and native identity checks. Run offline release recovery tests on Linux, macOS and Windows.
+
 ## 0.8.9
 
 - Recover a new package-manager pull request whose mergeability changes to clean while auto-merge is being enabled. Re-read its exact head and state before one ordinary merge request; unrelated failures and changed heads still stop publication.
