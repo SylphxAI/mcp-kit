@@ -262,7 +262,7 @@ test('existing releases build from the immutable tag source instead of newer mai
 });
 
 test('workflow keeps required build success and verifies replacement before retirement', () => {
-  const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   assert.match(workflow, /publish:\n    needs: \[check, build\]/);
   assert.match(workflow, /docker:\n    needs: \[check, build\]/);
   assert.match(workflow, /registry-retired:\n    needs: \[check, build, publish\]/);
@@ -338,7 +338,7 @@ test('later same-version main B recovers four platforms and compiles missing pla
     { repository: canonical.repository, commit: 'b'.repeat(40) }, async (url) => new Response(identities.find((asset) => asset.url === url).bytes));
   assert.equal(result.canonical.commit, canonical.commit);
   assert.equal(result.done.publish, true);
-  const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   for (const job of ['build', 'publish', 'docker']) {
     const section = workflow.slice(workflow.indexOf(`\n  ${job}:\n`) + 1).split(/\n  [a-z][a-z-]*:/)[0];
     assert.match(section, /- uses: actions\/checkout@v4\n        with:\n          ref: \$\{\{ needs.check.outputs.canonical \}\}/);
