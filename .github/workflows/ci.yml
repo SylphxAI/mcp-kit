@@ -154,7 +154,7 @@ jobs:
 
   ci:
     if: always()
-    needs: [test, semver, plain-language, identifiers, chat-senders, other-os]
+    needs: [test, release-recovery, semver, plain-language, identifiers, chat-senders, other-os]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -167,7 +167,7 @@ jobs:
   # cancelled lane fails.
   ci-ok:
     if: always()
-    needs: [test, semver, plain-language, identifiers, chat-senders, other-os]
+    needs: [test, release-recovery, semver, plain-language, identifiers, chat-senders, other-os]
     # The reserved gate pool (Kueue queue scale-set-gate, never lends): an
     # `if: always()` verdict still runs after its run is cancelled, and that run
     # keeps its concurrency group until it does, so on a busy build pool a
@@ -184,4 +184,5 @@ jobs:
           required: >-
             other-os,
             ${{ (github.event_name != 'merge_group') && 'test,identifiers' || '' }},
+            ${{ (github.event_name != 'merge_group' && github.event.repository.private == false) && 'release-recovery' || '' }},
             ${{ (github.event_name == 'merge_group' || github.event.repository.private == false) && 'semver,chat-senders' || '' }}
