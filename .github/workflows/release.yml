@@ -41,6 +41,10 @@ on:
         description: 'Optional MCP Registry name; omit for a plain CLI release.'
         type: string
         default: ''
+      source-sha:
+        description: 'Optional exact lowercase 40-hex source commit; empty preserves event-source and existing-release recovery.'
+        type: string
+        default: ''
       platforms:
         description: 'Space-separated native platform keys; empty selects all five supported targets.'
         type: string
@@ -161,6 +165,8 @@ jobs:
       docker-missing: ${{ steps.v.outputs.docker-missing }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source-sha || github.sha }}
       - uses: actions/checkout@v4
         with:
           repository: SylphxAI/mcp-kit
@@ -192,6 +198,7 @@ jobs:
           MCPB: ${{ inputs.mcpb }}
           RELEASE_PLATFORMS: ${{ inputs.platforms }}
           LINUX_GLIBC: ${{ inputs.linux-glibc }}
+          SOURCE_SHA: ${{ inputs.source-sha }}
         run: node .mcp-kit/scripts/release.mjs plan
 
   build:
@@ -267,7 +274,7 @@ jobs:
         run: node .mcp-kit/scripts/release.mjs version "./out/${{ inputs.name }}${{ matrix.exe }}"
       - uses: actions/upload-artifact@v4
         with:
-          name: native-${{ matrix.key }}
+          name: native-${{ needs.check.outputs.canonical }}-${{ matrix.key }}
           path: out/*
           if-no-files-found: error
           retention-days: 3
@@ -306,15 +313,16 @@ jobs:
           node-version: '24'
       # Trusted publishing (OIDC) needs npm >= 11.5.1.
       - run: npm install -g npm@^11.5.1
-      # Only the binaries: a re-run also sees other artifacts of the run,
-      # such as the Docker build record.
+      # Only this source's binaries: other calls in the run may release other
+      # versions, and Docker also uploads its own build record.
       - uses: actions/download-artifact@v4
         with:
-          pattern: native-*
+          pattern: native-${{ needs.check.outputs.canonical }}-*
           path: artifacts
       - name: Stage natives
         run: |
           set -euo pipefail
+          node .mcp-kit/scripts/release.mjs artifacts
           node .mcp-kit/scripts/release.mjs stage
           cp README.md LICENSE "$DIR/"
       - name: Publish missing npm packages
@@ -468,11 +476,12 @@ jobs:
           sparse-checkout: scripts
       - uses: actions/download-artifact@v4
         with:
-          pattern: native-linux-*
+          pattern: native-${{ needs.check.outputs.canonical }}-linux-*
           path: artifacts
       - name: Stage prebuilt linux binaries
         run: |
           set -euo pipefail
+          node .mcp-kit/scripts/release.mjs artifacts linux-x64-gnu linux-arm64-gnu
           node .mcp-kit/scripts/release.mjs stage linux-x64-gnu linux-arm64-gnu
           mkdir -p dist/amd64 dist/arm64
           cp "artifacts/native-linux-x64-gnu/$NAME" dist/amd64/
