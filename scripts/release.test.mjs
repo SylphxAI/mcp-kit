@@ -6,6 +6,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { KEYS, releasePlatforms, buildMatrix, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, releaseCommit, sameSource, deliveryPlan, selectedSource, verifyCheckout, nativeArtifactName, normalizeArtifacts } from './release.mjs';
 
 process.env.RELEASE_RETRY_MS = '0';
@@ -612,7 +613,7 @@ test('planner entrypoint emits the selected source, not the event SHA, and legac
     const selected = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
     for (const key of KEYS) write(`packages/npm/${key}`, { name: `@x/tool-${key}`, version: '1.2.3' });
     write('packages/tool', { name: '@x/tool', version: '1.2.3', optionalDependencies: Object.fromEntries(KEYS.map((key) => [`@x/tool-${key}`, '1.2.3'])) });
-    const preload = join(root, 'offline.mjs');
+    const preload = join(root, 'offline fixture #.mjs');
     writeFileSync(preload, `import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 const original = cp.execFileSync;
@@ -628,7 +629,7 @@ globalThis.fetch = async () => new Response('{}', { status: 404 });
     for (const [source, expected] of [[selected, selected], ['', event], [undefined, event]]) {
       const input = { ...env };
       if (source === undefined) delete input.SOURCE_SHA; else input.SOURCE_SHA = source;
-      const result = spawnSync(process.execPath, ['--import', preload, cli, 'plan'], { cwd: root, encoding: 'utf8', env: input });
+      const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, 'plan'], { cwd: root, encoding: 'utf8', env: input });
       assert.equal(result.status, 0, result.stderr);
       const outputs = Object.fromEntries(result.stdout.split('\n').filter((line) => line.includes('=')).map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
       assert.equal(outputs.canonical, expected);
