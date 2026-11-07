@@ -2,7 +2,7 @@
 // Only HTTP 404 means absent. Everything else must return the exact identity.
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync, readdirSync, mkdirSync, copyFileSync, chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, mkdirSync, copyFileSync, chmodSync, mkdtempSync, rmSync, renameSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -88,15 +88,52 @@ export async function github(repo, version, fetcher = fetch) {
   return value;
 }
 
-export function releaseCommit(version, release, exec = execFileSync) {
-  if (!release) return process.env.GITHUB_SHA;
-  const target = release.target_commitish;
-  if (typeof target === 'string' && /^[a-f0-9]{40}$/.test(target)) return target;
+// Empty selects the original event/recovery mode; nonempty is an exact source.
+export function selectedSource(value = '') {
+  if (value !== '' && !/^[a-f0-9]{40}$/.test(value)) throw new Error('source-sha must be an exact lowercase 40-hex commit SHA');
+  return value;
+}
+export function verifyCheckout(commit, exec = execFileSync) {
+  if (!commit || !selectedSource(commit)) throw new Error('missing canonical source');
+  if (exec('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() !== commit) throw new Error('checkout differs from selected canonical source');
+}
+export function releaseCommit(version, release, exec = execFileSync, sourceSha = '') {
+  const selected = selectedSource(sourceSha);
+  const target = release?.target_commitish;
   const tag = `v${version}`;
+  if (selected) {
+    if (typeof target === 'string' && /^[a-f0-9]{40}$/.test(target) && target !== selected) throw new Error('GitHub release source conflicts with source-sha');
+    // A surviving version tag is also publication provenance, even if the release
+    // record is absent. Symbolic target_commitish values are not immutable.
+    const ref = `refs/tags/${tag}`;
+    const remote = exec('git', ['ls-remote', '--refs', 'origin', ref], { encoding: 'utf8' }).trim();
+    if (!remote && !release) return selected;
+    if (!/^[a-f0-9]{40}\s/.test(remote) || remote.split(/\s+/).length !== 2 || remote.split(/\s+/)[1] !== ref) throw new Error('version tag source is absent or invalid');
+    exec('git', ['fetch', '--no-tags', 'origin', ref], { stdio: 'inherit' });
+    const commit = exec('git', ['rev-parse', 'FETCH_HEAD^{commit}'], { encoding: 'utf8' }).trim();
+    if (commit !== selected) throw new Error('version tag source conflicts with source-sha');
+    return selected;
+  }
+  if (!release) return process.env.GITHUB_SHA;
+  if (typeof target === 'string' && /^[a-f0-9]{40}$/.test(target)) return target;
   exec('git', ['fetch', '--no-tags', 'origin', `refs/tags/${tag}:refs/tags/${tag}`], { stdio: 'inherit' });
   const commit = exec('git', ['rev-parse', `${tag}^{commit}`], { encoding: 'utf8' }).trim();
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('release tag source is not a commit SHA');
   return commit;
+}
+
+export function nativeArtifactName(commit, key) {
+  if (!selectedSource(commit) || !KEYS.includes(key)) throw new Error('invalid native artifact identity');
+  return `native-${commit}-${key}`;
+}
+// download-artifact retains the artifact name as its directory. Normalize only
+// this invocation's exact source; all existing stage/image readers stay shared.
+export function normalizeArtifacts(commit, keys = KEYS, root = 'artifacts') {
+  const paths = keys.map((key) => [join(root, nativeArtifactName(commit, key)), join(root, `native-${key}`)]);
+  for (const [source, destination] of paths) {
+    if (!existsSync(source) || existsSync(destination)) throw new Error('missing scoped native artifact or conflicting staged artifact');
+  }
+  for (const [source, destination] of paths) renameSync(source, destination);
 }
 
 export async function image(name, version, fetcher = fetch, canonical, natives = {}, legacyComplete = false) {
@@ -234,9 +271,12 @@ export function completion(packages, release, mcp, docker, wantedAssets, wantsDo
     publish: !npmDone || !githubDone || !registryDone || !dockerDone };
 }
 
-export async function deliveryPlan(config, packages, release, mcp, { repository, commit, imageName = '', bundles = false, wantsRegistry = true }, fetcher = fetch) {
+export async function deliveryPlan(config, packages, release, mcp, { repository, commit, sourceSha = '', imageName = '', bundles = false, wantsRegistry = true }, fetcher = fetch) {
   const keys = config.keys || KEYS;
-  const sources = [], nativeIdentities = {};
+  const selected = selectedSource(sourceSha);
+  const sources = selected ? [{ repository, commit: selected }] : [];
+  const nativeIdentities = {};
+  if (selected && commit !== selected) throw new Error('release source conflicts with source-sha');
   for (const key of keys) {
     const identity = await sidecar(release, config.name, key, fetcher);
     if (identity) {
@@ -397,6 +437,13 @@ async function main() {
     console.log(value?._meta?.['io.modelcontextprotocol.registry/official']?.status === 'deprecated');
     return;
   }
+  const selected = selectedSource(process.env.SOURCE_SHA || '');
+  if (command === 'plan') { if (selected) verifyCheckout(selected); }
+  else verifyCheckout(process.env.CANONICAL_SHA);
+  if (command === 'artifacts') {
+    normalizeArtifacts(process.env.CANONICAL_SHA, args.length ? args : releasePlatforms(process.env.RELEASE_PLATFORMS));
+    return;
+  }
   const config = manifests();
   if (command === 'plan') {
     cargoIdentity(JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], { encoding: 'utf8' })), config.cargo, config.version);
@@ -404,7 +451,7 @@ async function main() {
     for (const pkg of config.packages) packages.push(await npm(pkg.name, config.version));
     const release = await github(process.env.GITHUB_REPOSITORY, config.version);
     const mcp = process.env.MCP_NAME ? await registry(process.env.MCP_NAME, config.version) : null;
-    const { canonical, done } = await deliveryPlan(config, packages, release, mcp, { repository: process.env.GITHUB_REPOSITORY, commit: releaseCommit(config.version, release), imageName: process.env.IMAGE || '', bundles: process.env.MCPB === 'true', wantsRegistry: Boolean(process.env.MCP_NAME) });
+    const { canonical, done } = await deliveryPlan(config, packages, release, mcp, { repository: process.env.GITHUB_REPOSITORY, commit: releaseCommit(config.version, release, execFileSync, selected), sourceSha: selected, imageName: process.env.IMAGE || '', bundles: process.env.MCPB === 'true', wantsRegistry: Boolean(process.env.MCP_NAME) });
     output('matrix', JSON.stringify(buildMatrix(config.keys, process.env.LINUX_GLIBC || "2.17")));
     output('canonical', canonical.commit);
     output('version', config.version); output('dir', config.dir); output('cargo', config.cargo); output('publish', done.publish);
@@ -414,7 +461,6 @@ async function main() {
     output('recovered', await recover(config, args[0], 'out'));
   } else if (command === 'cargo') {
     cargoIdentity(JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], { encoding: 'utf8' })), config.cargo, config.version);
-    if (execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() !== process.env.CANONICAL_SHA) throw new Error('checkout differs from canonical source');
   } else if (command === 'identity') {
     const key = args[0], file = join('out', binary(config.name, key));
     writeFileSync(join('out', 'identity.json'), JSON.stringify(nativeIdentity(config.name, config.version, key, readFileSync(file), sourceIdentity({ repository: process.env.GITHUB_REPOSITORY, commit: process.env.CANONICAL_SHA }))));

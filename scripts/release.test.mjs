@@ -2,11 +2,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { KEYS, releasePlatforms, buildMatrix, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, releaseCommit, sameSource, deliveryPlan } from './release.mjs';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { KEYS, releasePlatforms, buildMatrix, request, npm, registry, crate, github, image, manifests, cargoIdentity, requiredAssets, completion, verifyIntegrity, nativeIdentity, verifyNative, verifyVersion, recover, canonicalSource, releaseCommit, sameSource, deliveryPlan, selectedSource, verifyCheckout, nativeArtifactName, normalizeArtifacts } from './release.mjs';
 
 process.env.RELEASE_RETRY_MS = '0';
 const response = (status, value) => new Response(JSON.stringify(value), { status });
@@ -469,4 +470,178 @@ test('Linux native builds honor the selected glibc baseline without changing oth
   for (const target of currentMatrix.filter((target) => target.key.startsWith('linux'))) assert.equal(target.zig, '2.34');
   assert.deepEqual(currentMatrix.filter((target) => !target.key.startsWith('linux')), defaultMatrix.filter((target) => !target.key.startsWith('linux')));
   for (const invalid of ['2.16', 'wrong', '2.34; echo wrong']) assert.throws(() => buildMatrix(KEYS, invalid), /invalid Linux glibc/);
+});
+
+
+test('explicit source overrides a differing event SHA and constrains a new release plan', async () => {
+  const saved = process.env.GITHUB_SHA;
+  process.env.GITHUB_SHA = 'b'.repeat(40);
+  try {
+    const calls = [];
+    const exec = (file, args) => { calls.push([file, args]); return ''; };
+    const selected = releaseCommit('1.2.3', null, exec, canonical.commit);
+    assert.equal(selected, canonical.commit);
+    assert.deepEqual(calls, [['git', ['ls-remote', '--refs', 'origin', 'refs/tags/v1.2.3']]]);
+    const result = await deliveryPlan({ name: 'tool', version: '1.2.3' }, Array(6).fill(null), null, null,
+      { repository: canonical.repository, commit: selected, sourceSha: selected, wantsRegistry: false });
+    assert.deepEqual(result.canonical, canonical);
+    assert.equal(result.done.publish, true);
+    assert.equal(releaseCommit('1.2.3', null), process.env.GITHUB_SHA, 'omitted source retains event fallback');
+    assert.equal(releaseCommit('1.2.3', null, exec, ''), process.env.GITHUB_SHA, 'empty source retains event fallback');
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_SHA; else process.env.GITHUB_SHA = saved;
+  }
+});
+
+test('source-sha rejects refs, short hashes, uppercase and whitespace', () => {
+  assert.equal(selectedSource(), '');
+  assert.equal(selectedSource(canonical.commit), canonical.commit);
+  for (const source of ['main', 'refs/heads/main', 'a'.repeat(39), 'a'.repeat(41), 'A'.repeat(40), 'a'.repeat(40) + '\n', ' ']) {
+    assert.throws(() => selectedSource(source), /exact lowercase 40-hex/);
+    assert.throws(() => releaseCommit('1.2.3', null, () => { throw new Error('must not reach git'); }, source), /exact lowercase 40-hex/);
+  }
+});
+
+test('wrong selected checkout and malformed selection fail the real planner before manifest reads', () => {
+  const root = mkdtempSync(join(tmpdir(), 'release-checkout-'));
+  const cli = resolve('scripts/release.mjs');
+  try {
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture', '--allow-empty']);
+    const actual = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    verifyCheckout(actual, (file, args, options) => execFileSync(file, args, { ...options, cwd: root }));
+    for (const [source, pattern] of [[canonical.commit, /checkout differs/], ['main', /exact lowercase 40-hex/]]) {
+      const result = spawnSync(process.execPath, [cli, 'plan'], { cwd: root, encoding: 'utf8', env: { ...process.env, SOURCE_SHA: source } });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, pattern);
+      assert.doesNotMatch(result.stderr, /ENOENT/);
+      assert.equal(result.stdout, '', 'no plan outputs before validation');
+    }
+    for (const command of ['recover', 'cargo', 'identity', 'version', 'stage', 'assets']) {
+      const result = spawnSync(process.execPath, [cli, command], { cwd: root, encoding: 'utf8', env: { ...process.env, SOURCE_SHA: '', CANONICAL_SHA: canonical.commit } });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /checkout differs/);
+      assert.doesNotMatch(result.stderr, /ENOENT/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('explicit source refuses conflicting npm and digest-verified sidecar provenance', async () => {
+  const other = { ...canonical, commit: 'b'.repeat(40) };
+  const config = { name: 'tool', version: '1.2.3' };
+  const options = { repository: canonical.repository, commit: canonical.commit, sourceSha: canonical.commit, wantsRegistry: false };
+  await assert.rejects(deliveryPlan(config, [{ gitHead: other.commit }], null, null, options), /mixed canonical sources/);
+  const bytes = Buffer.from(JSON.stringify(nativeIdentity('tool', '1.2.3', KEYS[0], Buffer.from('native'), other)));
+  const release = { assets: [{ name: `tool-${KEYS[0]}.identity.json`, digest: `sha256:${createHash('sha256').update(bytes).digest('hex')}`, url: 'https://fixture.test/identity' }] };
+  await assert.rejects(deliveryPlan(config, Array(6).fill(null), release, null, options, async () => new Response(bytes)), /mixed canonical sources/);
+  await assert.rejects(deliveryPlan(config, [], null, null, { ...options, commit: other.commit }), /release source conflicts/);
+  // Existing matching provenance remains a valid no-op, without fetching or relabelling legacy binaries.
+  const completeRelease = { assets: requiredAssets('tool', '1.2.3', false, false).map((name) => ({ name })) };
+  const result = await deliveryPlan(config, Array(6).fill({ gitHead: canonical.commit }), completeRelease, null, options);
+  assert.equal(result.done.publish, false);
+  assert.deepEqual(result.canonical, canonical);
+});
+
+test('explicit source verifies peeled version tags, including tags surviving a missing release', () => {
+  const root = mkdtempSync(join(tmpdir(), 'release-tag-'));
+  const git = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  try {
+    git(['init', '-q']);
+    const author = ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test'];
+    git([...author, 'commit', '-qm', 'first', '--allow-empty']);
+    const first = git(['rev-parse', 'HEAD']);
+    git([...author, 'tag', '-a', 'v1.2.3', '-m', 'version']);
+    git([...author, 'commit', '-qm', 'second', '--allow-empty']);
+    const second = git(['rev-parse', 'HEAD']);
+    git(['remote', 'add', 'origin', root]);
+    const exec = (file, args, options) => execFileSync(file, args, { ...options, cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
+    assert.equal(releaseCommit('1.2.3', null, exec, first), first);
+    assert.equal(releaseCommit('1.2.3', { target_commitish: 'main' }, exec, first), first);
+    assert.equal(releaseCommit('1.2.3', { target_commitish: first }, exec, first), first);
+    assert.throws(() => releaseCommit('1.2.3', null, exec, second), /version tag source conflicts/);
+    assert.throws(() => releaseCommit('1.2.3', { target_commitish: second }, exec, first), /GitHub release source conflicts/);
+    assert.equal(releaseCommit('9.9.9', null, exec, second), second, 'unused version selects explicit source');
+    assert.throws(() => releaseCommit('9.9.9', { target_commitish: first }, exec, first), /version tag source is absent/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('two source cuts in one run retain isolated native inventories for npm and Docker', () => {
+  const root = mkdtempSync(join(tmpdir(), 'release-artifacts-'));
+  const sources = [canonical.commit, 'b'.repeat(40)];
+  try {
+    // One run's shared inventory contains both cuts with every platform.
+    for (const source of sources) for (const key of KEYS) {
+      const dir = join(root, nativeArtifactName(source, key));
+      mkdirSync(dir);
+      writeFileSync(join(dir, 'identity.json'), JSON.stringify({ source, key }));
+    }
+    const allNames = sources.flatMap((source) => KEYS.map((key) => nativeArtifactName(source, key)));
+    assert.equal(new Set(allNames).size, 10, 'v4 artifact names do not collide');
+    for (const source of sources) {
+      const publish = join(root, `publish-${source}`), docker = join(root, `docker-${source}`);
+      // Model download-artifact's source-prefixed pattern in separate job roots.
+      for (const [destination, keys] of [[publish, KEYS], [docker, KEYS.filter((key) => key.startsWith('linux'))]]) {
+        for (const key of keys) {
+          const name = nativeArtifactName(source, key);
+          mkdirSync(join(destination, name), { recursive: true });
+          writeFileSync(join(destination, name, 'identity.json'), readFileSync(join(root, name, 'identity.json')));
+        }
+        normalizeArtifacts(source, keys, destination);
+        for (const key of keys) assert.deepEqual(JSON.parse(readFileSync(join(destination, `native-${key}`, 'identity.json'))), { source, key });
+        assert.throws(() => normalizeArtifacts(source, keys, destination), /missing scoped native artifact or conflicting/);
+      }
+    }
+    // Even a mixed inventory cannot select the other cut; its original bytes remain untouched.
+    normalizeArtifacts(sources[0], KEYS, root);
+    for (const key of KEYS) {
+      assert.deepEqual(JSON.parse(readFileSync(join(root, `native-${key}`, 'identity.json'))), { source: sources[0], key });
+      assert.ok(existsSync(join(root, nativeArtifactName(sources[1], key))));
+    }
+    assert.throws(() => nativeArtifactName('main', KEYS[0]), /exact lowercase/);
+    assert.throws(() => nativeArtifactName(canonical.commit, 'wrong'), /invalid native artifact/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('planner entrypoint emits the selected source, not the event SHA, and legacy empty selection still works', () => {
+  const root = mkdtempSync(join(tmpdir(), 'release-plan-'));
+  const cli = resolve('scripts/release.mjs');
+  const event = 'b'.repeat(40);
+  const write = (dir, value) => { mkdirSync(join(root, dir), { recursive: true }); writeFileSync(join(root, dir, 'package.json'), JSON.stringify(value)); };
+  try {
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-qm', 'fixture', '--allow-empty']);
+    const selected = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    for (const key of KEYS) write(`packages/npm/${key}`, { name: `@x/tool-${key}`, version: '1.2.3' });
+    write('packages/tool', { name: '@x/tool', version: '1.2.3', optionalDependencies: Object.fromEntries(KEYS.map((key) => [`@x/tool-${key}`, '1.2.3'])) });
+    const preload = join(root, 'offline fixture #.mjs');
+    writeFileSync(preload, `import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const original = cp.execFileSync;
+cp.execFileSync = (file, args, options) => {
+  if (file === 'cargo') return JSON.stringify({ packages: [{ name: 'tool', version: '1.2.3' }] });
+  if (file === 'git' && args[0] === 'ls-remote') return '';
+  return original(file, args, options);
+};
+syncBuiltinESMExports();
+globalThis.fetch = async () => new Response('{}', { status: 404 });
+`);
+    const env = { ...process.env, NAME: 'tool', PKG: '@x/tool', DIR: '', NATIVES: '', CARGO: '', ALIASES: '', MCP_NAME: '', MCPB: '', IMAGE: '', VERSION_ARG: '', RELEASE_PLATFORMS: '', LINUX_GLIBC: '', GITHUB_REPOSITORY: canonical.repository, GITHUB_SHA: event, CANONICAL_SHA: '', GITHUB_OUTPUT: '' };
+    for (const [source, expected] of [[selected, selected], ['', event], [undefined, event]]) {
+      const input = { ...env };
+      if (source === undefined) delete input.SOURCE_SHA; else input.SOURCE_SHA = source;
+      const result = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, cli, 'plan'], { cwd: root, encoding: 'utf8', env: input });
+      assert.equal(result.status, 0, result.stderr);
+      const outputs = Object.fromEntries(result.stdout.split('\n').filter((line) => line.includes('=')).map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+      assert.equal(outputs.canonical, expected);
+      assert.equal(outputs.version, '1.2.3');
+      assert.equal(outputs.publish, 'true');
+      assert.equal(JSON.parse(outputs.matrix).include.length, KEYS.length);
+    }
+    const artifacts = join(root, 'artifacts', nativeArtifactName(selected, KEYS[0]));
+    mkdirSync(artifacts, { recursive: true });
+    writeFileSync(join(artifacts, 'identity.json'), 'selected native');
+    const staged = spawnSync(process.execPath, [cli, 'artifacts', KEYS[0]], { cwd: root, encoding: 'utf8', env: { ...env, SOURCE_SHA: '', CANONICAL_SHA: selected } });
+    assert.equal(staged.status, 0, staged.stderr);
+    assert.equal(readFileSync(join(root, 'artifacts', `native-${KEYS[0]}`, 'identity.json'), 'utf8'), 'selected native');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
