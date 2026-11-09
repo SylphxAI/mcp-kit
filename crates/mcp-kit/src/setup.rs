@@ -79,6 +79,8 @@ pub fn installed(bin: &str) -> bool {
 
 fn clients(home: &Path, config: &Path, codex_on_path: bool) -> Vec<Client> {
     let c = |id, label, detect: PathBuf, config: PathBuf, format| Client { id, label, detect, config, format };
+    let antigravity_config = home.join(".gemini/config");
+    let antigravity_cli = home.join(".gemini/antigravity-cli");
     vec![
         c("claude-code", "Claude Code", home.join(".claude"), home.join(".claude.json"), Format::ClaudeJson),
         // Codex may be installed without a config dir yet.
@@ -89,6 +91,18 @@ fn clients(home: &Path, config: &Path, codex_on_path: bool) -> Vec<Client> {
         c("claude-desktop", "Claude Desktop", config.join("Claude"), config.join("Claude/claude_desktop_config.json"), Format::McpServers),
         c("windsurf", "Windsurf", home.join(".codeium/windsurf"), home.join(".codeium/windsurf/mcp_config.json"), Format::McpServers),
         c("gemini", "Gemini CLI", home.join(".gemini"), home.join(".gemini/settings.json"), Format::McpServers),
+        // The CLI can create its own directory before the shared global config exists.
+        c(
+            "antigravity",
+            "Antigravity",
+            if antigravity_cli.is_dir() {
+                antigravity_cli
+            } else {
+                antigravity_config.clone()
+            },
+            antigravity_config.join("mcp_config.json"),
+            Format::McpServers,
+        ),
     ]
 }
 
@@ -420,6 +434,75 @@ mod tests {
         assert_eq!(setup_fixture(home.path(), None).unwrap(), 1);
         assert!(home.path().join(".cursor/mcp.json").is_file());
         assert!(!home.path().join(".claude.json").exists());
+    }
+
+    #[test]
+    fn setup_detects_antigravity_separately_from_gemini() {
+        for marker in [".gemini/config", ".gemini/antigravity-cli"] {
+            let home = tempfile::tempdir().unwrap();
+            let gemini = home.path().join(".gemini/settings.json");
+            let antigravity = home.path().join(".gemini/config/mcp_config.json");
+            std::fs::create_dir(gemini.parent().unwrap()).unwrap();
+            assert_eq!(setup_fixture(home.path(), None).unwrap(), 1);
+            assert!(gemini.is_file());
+            assert!(!antigravity.exists());
+            let gemini_settings = std::fs::read(&gemini).unwrap();
+
+            std::fs::create_dir(home.path().join(marker)).unwrap();
+            assert_eq!(setup_fixture(home.path(), None).unwrap(), 1);
+            let (command, args) = if cfg!(windows) {
+                ("cmd", vec!["/c", "npx", "-y", "@example/tool", "mcp"])
+            } else {
+                ("npx", vec!["-y", "@example/tool", "mcp"])
+            };
+            assert_eq!(
+                read_json(&antigravity).unwrap(),
+                json!({"mcpServers": {"example": {"command": command, "args": args}}}),
+            );
+            assert_eq!(std::fs::read(gemini).unwrap(), gemini_settings);
+            assert_eq!(setup_fixture(home.path(), None).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn setup_can_select_antigravity_before_detection_and_remove_only_its_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let antigravity = home.path().join(".gemini/config/mcp_config.json");
+        let server = Server {
+            name: "example".into(),
+            package: "@example/tool".into(),
+            args: vec!["mcp".into()],
+        };
+        let mut opts = Options {
+            clients: Some(vec!["antigravity".into()]),
+            dry_run: true,
+            ..Default::default()
+        };
+        let run = |opts: &Options| {
+            run_in(
+                &server,
+                opts,
+                home.path(),
+                &home.path().join("config"),
+                |_| false,
+            )
+        };
+        assert_eq!(run(&opts).unwrap(), 1);
+        assert!(!home.path().join(".gemini").exists());
+        opts.dry_run = false;
+        assert_eq!(run(&opts).unwrap(), 1);
+        assert!(!home.path().join(".gemini/settings.json").exists());
+
+        let mut config = read_json(&antigravity).unwrap();
+        config["mcpServers"]["other"] = json!({"command": "other"});
+        write_json(&antigravity, &config).unwrap();
+        opts.remove = true;
+        assert_eq!(run(&opts).unwrap(), 1);
+        assert_eq!(
+            read_json(&antigravity).unwrap(),
+            json!({"mcpServers": {"other": {"command": "other"}}}),
+        );
+        assert_eq!(run(&opts).unwrap(), 0);
     }
 
     fn tmp(name: &str) -> PathBuf {
