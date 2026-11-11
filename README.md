@@ -104,7 +104,8 @@ Supported clients:
 | VS Code (and Insiders) | the user `mcp.json` |
 | Claude Desktop | its config |
 | Windsurf | its config |
-| Gemini CLI | its config |
+| Gemini CLI | `~/.gemini/settings.json` |
+| Antigravity (CLI and IDE) | `~/.gemini/config/mcp_config.json` |
 
 Every change is safe to repeat and is printed. `remove: true` undoes it. `setup::claude_hook` adds, updates or removes a Claude Code hook identified by a marker string.
 

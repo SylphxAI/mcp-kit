@@ -90,6 +90,8 @@ fn clients() -> Vec<Client> {
         c("claude-desktop", "Claude Desktop", config.join("Claude"), config.join("Claude/claude_desktop_config.json"), Format::McpServers),
         c("windsurf", "Windsurf", home.join(".codeium/windsurf"), home.join(".codeium/windsurf/mcp_config.json"), Format::McpServers),
         c("gemini", "Gemini CLI", home.join(".gemini"), home.join(".gemini/settings.json"), Format::McpServers),
+        // ~/.gemini/config is used by Antigravity CLI and IDE (not Gemini CLI); ~/.gemini/antigravity-cli may exist before it.
+        c("antigravity", "Antigravity", if home.join(".gemini/antigravity-cli").exists() { home.join(".gemini/antigravity-cli") } else { home.join(".gemini/config") }, home.join(".gemini/config/mcp_config.json"), Format::McpServers),
     ]
 }
 

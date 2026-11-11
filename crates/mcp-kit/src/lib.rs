@@ -6,7 +6,7 @@
 //! - [`roots`]: choose which directory a call works on, from an explicit
 //!   argument, environment variables, a launch default, or the client's roots.
 //! - [`setup`]: register the server with Claude Code, Codex, Cursor, VS Code,
-//!   Claude Desktop, Windsurf and Gemini CLI, and optionally add a Claude Code hook.
+//!   Claude Desktop, Windsurf, Gemini CLI and Antigravity, and optionally add a Claude Code hook.
 //! - [`licence`] (feature `licence`): sell a Pro tier with an offline-verified
 //!   Ed25519 token, a polite upgrade notice and a `licence` CLI.
 //! - [`remote`] (feature `remote`): serve the same app over Streamable HTTP as
