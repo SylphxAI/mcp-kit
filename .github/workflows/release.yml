@@ -132,9 +132,6 @@ on:
         type: string
         default: ''
     secrets:
-      NPM_TOKEN:
-        description: 'Optional existing npm token for bootstrapping unpublished packages; omit for trusted publishing.'
-        required: false
       TAP_APP_ID:
         description: 'Deprecated, ignored. Use the caller-owned package-managers composite action.'
         required: false
@@ -174,15 +171,6 @@ jobs:
           path: .mcp-kit
           sparse-checkout: scripts
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - name: Verify an explicitly supplied npm credential
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
-            printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > "$RUNNER_TEMP/npm-preflight.rc"
-            npm whoami --registry=https://registry.npmjs.org --userconfig "$RUNNER_TEMP/npm-preflight.rc"
-          fi
       - id: v
         env:
           GH_TOKEN: ${{ github.token }}
@@ -311,6 +299,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          registry-url: https://registry.npmjs.org
       # Trusted publishing (OIDC) needs npm >= 11.5.1.
       - run: npm install -g npm@^11.5.1
       # Only this source's binaries: other calls in the run may release other
@@ -327,22 +316,14 @@ jobs:
           cp README.md LICENSE "$DIR/"
       - name: Publish missing npm packages
         if: needs.check.outputs.npm-missing == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
-            # npm reads the token from memory through this placeholder. Never log it.
-            printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > "$RUNNER_TEMP/npmrc"
-            export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc"
-            npm whoami --registry=https://registry.npmjs.org
-          fi
           pub() {
             local dir=$1 name
             name=$(node -p "require('./$dir/package.json').name")
             present=$(node .mcp-kit/scripts/release.mjs probe npm "$name" "$V")
             if [ "$present" = true ]; then echo "= $name@$V already live"; return; fi
-            (cd "$dir" && npm publish --access public)
+            (cd "$dir" && npm publish --access public --provenance)
             echo "+ $name@$V"
           }
           for d in "$NATIVES"/*/; do pub "${d%/}"; done
