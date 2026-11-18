@@ -34,7 +34,8 @@ impl Server {
 pub struct Options {
     pub dry_run: bool,
     pub remove: bool,
-    /// Only these client ids (e.g. `cursor`, `codex`); otherwise every detected client.
+    /// Only these client IDs (e.g. `cursor`, `codex`); unknown IDs are errors.
+    /// With `None`, use every detected client.
     pub clients: Option<Vec<String>>,
 }
 
@@ -76,14 +77,12 @@ pub fn installed(bin: &str) -> bool {
     })
 }
 
-fn clients() -> Vec<Client> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+fn clients(home: &Path, config: &Path, codex_on_path: bool) -> Vec<Client> {
     let c = |id, label, detect: PathBuf, config: PathBuf, format| Client { id, label, detect, config, format };
     vec![
         c("claude-code", "Claude Code", home.join(".claude"), home.join(".claude.json"), Format::ClaudeJson),
         // Codex may be installed without a config dir yet.
-        c("codex", "Codex", if on_path("codex") { home.clone() } else { home.join(".codex") }, home.join(".codex/config.toml"), Format::CodexToml),
+        c("codex", "Codex", if codex_on_path { home.to_path_buf() } else { home.join(".codex") }, home.join(".codex/config.toml"), Format::CodexToml),
         c("cursor", "Cursor", home.join(".cursor"), home.join(".cursor/mcp.json"), Format::McpServers),
         c("vscode", "VS Code", config.join("Code/User"), config.join("Code/User/mcp.json"), Format::VsCode),
         c("vscode-insiders", "VS Code Insiders", config.join("Code - Insiders/User"), config.join("Code - Insiders/User/mcp.json"), Format::VsCode),
@@ -99,13 +98,49 @@ pub enum Change {
     Wrote(&'static str),
 }
 
-/// Register (or remove) `server` in every detected client, printing one line each.
-/// Returns how many files changed.
+/// Register (or remove) the server in the selected clients, or auto-detect clients.
+/// Unknown client IDs are errors before any configuration is changed.
+/// Returns how many clients changed, printing one line per client.
 pub fn run(server: &Server, opts: &Options) -> Result<usize> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
+    run_in(server, opts, &home, &config, on_path)
+}
+
+fn validate_client_ids(ids: &[String], clients: &[Client]) -> Result<()> {
+    let Some(unknown) = ids.iter().find(|id| !clients.iter().any(|c| c.id == id.as_str())) else {
+        return Ok(());
+    };
+    let supported = clients.iter().map(|c| c.id).collect::<Vec<_>>().join(", ");
+    let matches: Vec<_> = clients
+        .iter()
+        .filter(|c| !unknown.is_empty() && c.id.starts_with(unknown.as_str()))
+        .map(|c| format!("{:?}", c.id))
+        .collect();
+    let hint = match matches.split_last() {
+        Some((last, [])) => format!(" Did you mean {last}?"),
+        Some((last, rest)) => format!(" Did you mean {} or {last}?", rest.join(", ")),
+        None => String::new(),
+    };
+    bail!("Unknown MCP client ID {unknown:?}. Supported client IDs: {supported}.{hint}");
+}
+
+fn run_in(
+    server: &Server,
+    opts: &Options,
+    home: &Path,
+    config: &Path,
+    on_path: impl Fn(&str) -> bool,
+) -> Result<usize> {
+    let clients = clients(home, config, on_path("codex"));
+    if let Some(ids) = &opts.clients {
+        validate_client_ids(ids, &clients)?;
+    }
+
     let (cmd, args) = server.launch();
     let mut touched = 0;
     let mut found = 0;
-    for c in clients() {
+    for c in clients {
         match &opts.clients {
             Some(only) if !only.iter().any(|o| o == c.id) => continue,
             None if !c.detect.exists() => continue,
@@ -320,6 +355,72 @@ pub fn claude_hook(path: &Path, hook: &Hook, opts: &Options) -> Result<Change> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn setup_fixture(home: &Path, ids: Option<&[&str]>) -> Result<usize> {
+        let server = Server {
+            name: "example".into(),
+            package: "@example/tool".into(),
+            args: vec!["mcp".into()],
+        };
+        let opts = Options {
+            clients: ids.map(|ids| ids.iter().map(|id| (*id).into()).collect()),
+            ..Default::default()
+        };
+        run_in(&server, &opts, home, &home.join("config"), |_| false)
+    }
+
+    #[test]
+    fn setup_rejects_unknown_client_before_any_writes() {
+        let home = tempfile::tempdir().unwrap();
+        let supported = clients(home.path(), &home.path().join("config"), false)
+            .iter()
+            .map(|c| c.id)
+            .collect::<Vec<_>>()
+            .join(", ");
+        for ids in [&["foo"][..], &["claude-code", "foo"][..]] {
+            let message = setup_fixture(home.path(), Some(ids)).unwrap_err().to_string();
+            assert_eq!(
+                message,
+                format!("Unknown MCP client ID \"foo\". Supported client IDs: {supported}.")
+            );
+            assert_eq!(home.path().read_dir().unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn setup_rejects_ambiguous_client_with_hint() {
+        let home = tempfile::tempdir().unwrap();
+        let message = setup_fixture(home.path(), Some(&["claude"]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.starts_with("Unknown MCP client ID \"claude\". Supported client IDs:"),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("Did you mean \"claude-code\" or \"claude-desktop\"?"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn setup_selects_valid_client_even_when_not_detected() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".cursor")).unwrap();
+        assert_eq!(setup_fixture(home.path(), Some(&["claude-code"])).unwrap(), 1);
+        assert!(home.path().join(".claude.json").is_file());
+        assert!(!home.path().join(".cursor/mcp.json").exists());
+    }
+
+    #[test]
+    fn setup_detects_clients_when_no_id_is_specified() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(setup_fixture(home.path(), None).unwrap(), 0);
+        std::fs::create_dir(home.path().join(".cursor")).unwrap();
+        assert_eq!(setup_fixture(home.path(), None).unwrap(), 1);
+        assert!(home.path().join(".cursor/mcp.json").is_file());
+        assert!(!home.path().join(".claude.json").exists());
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("mcp-kit-{name}-{}", std::process::id()));
