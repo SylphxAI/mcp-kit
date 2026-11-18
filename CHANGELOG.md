@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.13
+
+- Reject unknown setup client IDs before changing any settings. The error lists supported IDs and suggests matches for prefixes such as `claude`.
+
 ## 0.8.10
 
 - Recover native packages on Windows without treating drive letters as remote tar hosts. Extract archives from a local filename and keep original source, integrity and native identity checks. Run offline release recovery tests on Linux, macOS and Windows.
