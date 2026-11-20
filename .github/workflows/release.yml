@@ -10,8 +10,12 @@ name: release (reusable)
 #   jobs:
 #     release:
 #       uses: SylphxAI/mcp-kit/.github/workflows/release.yml@v0
-#       permissions: { contents: write, id-token: write, packages: write }
+#       permissions: { actions: write, contents: write, id-token: write, packages: write }
 #       with: { name: repomap, npm-package: '@sylphx/repomap', mcp-name: io.github.SylphxAI/repomap }
+#
+# `actions: write` is optional: when granted, intermediate `native-*` artifacts
+# are deleted immediately after publish finishes or fails; otherwise they expire
+# after 1 day.
 #
 # npm trusted publishing matches the CALLER's workflow file, so each npm
 # package trusts <owner>/<repo> + .github/workflows/release.yml.
@@ -139,8 +143,10 @@ on:
         description: 'Deprecated, ignored. The App key stays in the Broker.'
         required: false
 
-permissions:
-  contents: read
+# Individual jobs set explicit least-privilege permissions, except `publish`
+# (and `cleanup-docker-artifacts`) which inherit caller job permissions so
+# callers granting `actions: write` get immediate intermediate artifact cleanup
+# without failing validation on callers that omit `actions: write`.
 
 jobs:
   check:
@@ -193,6 +199,8 @@ jobs:
     needs: check
     if: needs.check.outputs.publish == 'true'
     name: build ${{ matrix.key }}
+    permissions:
+      contents: read
     env:
       CANONICAL_SHA: ${{ needs.check.outputs.canonical }}
       GH_TOKEN: ${{ github.token }}
@@ -272,15 +280,14 @@ jobs:
           name: native-${{ needs.check.outputs.canonical }}-${{ matrix.key }}
           path: out/*
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 1
 
   publish:
     needs: [check, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: write
-      id-token: write
+    # Inherits caller job permissions (`contents: write`, `id-token: write`,
+    # plus optional `actions: write` for immediate intermediate artifact cleanup).
     env:
       CANONICAL_SHA: ${{ needs.check.outputs.canonical }}
       GH_TOKEN: ${{ github.token }}
@@ -326,11 +333,19 @@ jobs:
         run: |
           set -euo pipefail
           pub() {
-            local dir=$1 name
+            local dir=$1 name present out status
             name=$(node -p "require('./$dir/package.json').name")
             present=$(node .mcp-kit/scripts/release.mjs probe npm "$name" "$V")
             if [ "$present" = true ]; then echo "= $name@$V already live"; return; fi
-            (cd "$dir" && npm publish --access public --provenance)
+            status=0
+            out=$(cd "$dir" && npm publish --access public --provenance 2>&1) || status=$?
+            if [ -n "$out" ]; then printf '%s\n' "$out"; fi
+            if [ "$status" -ne 0 ]; then
+              if grep -qiE 'E403|403 Forbidden|OIDC permission denied' <<<"$out"; then
+                echo "::error::npm publish returned 403 (OIDC permission denied) for $name@$V. Configure an npm Trusted Publisher for $name with repository $GITHUB_REPOSITORY and workflow .github/workflows/release.yml (filename release.yml)."
+              fi
+              return "$status"
+            fi
             echo "+ $name@$V"
           }
           for d in "$NATIVES"/*/; do pub "${d%/}"; done
@@ -430,6 +445,41 @@ jobs:
             fi
           fi
           node .mcp-kit/scripts/release.mjs wait registry "$MCP_NAME" "$V"
+      - name: Delete intermediate native artifacts
+        if: always()
+        env:
+          KEEP_LINUX: ${{ inputs.docker-image != '' && needs.check.outputs.docker-missing == 'true' }}
+        run: |
+          set -uo pipefail
+          [ -n "${CANONICAL_SHA:-}" ] || exit 0
+          prefix="native-${CANONICAL_SHA}-"
+          err=$(mktemp)
+          trap 'rm -f "$err"' EXIT
+          if ! artifacts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | "\(.id)\t\(.name)"' 2>"$err"); then
+            echo "skipping intermediate artifact cleanup (actions API unavailable or actions: write not granted): $(cat "$err")"
+            exit 0
+          fi
+          deleted=0
+          while IFS=$'\t' read -r id name; do
+            [ -n "$id" ] || continue
+            case "$name" in
+              "${prefix}"*) ;;
+              *) continue ;;
+            esac
+            if [ "${KEEP_LINUX:-false}" = true ]; then
+              case "$name" in
+                "${prefix}linux-"*) continue ;;
+              esac
+            fi
+            if gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null 2>"$err"; then
+              echo "deleted intermediate artifact $name ($id)"
+              deleted=$((deleted + 1))
+            else
+              echo "could not delete intermediate artifact $name ($id): $(cat "$err")"
+            fi
+          done <<< "$artifacts"
+          echo "cleaned up $deleted intermediate artifact(s) for $CANONICAL_SHA"
 
   docker:
     needs: [check, build]
@@ -507,10 +557,51 @@ jobs:
           test "$actual" = "$NAME $V"
           node .mcp-kit/scripts/release.mjs require image "$IMAGE" "$V"
 
+  cleanup-docker-artifacts:
+    needs: [check, build, publish, docker]
+    if: always() && inputs.docker-image != '' && needs.check.outputs.docker-missing == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Inherits caller job permissions so `actions: write` is used when granted
+    # without breaking callers that omit it.
+    env:
+      CANONICAL_SHA: ${{ needs.check.outputs.canonical }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Delete remaining intermediate native artifacts
+        run: |
+          set -uo pipefail
+          [ -n "${CANONICAL_SHA:-}" ] || exit 0
+          prefix="native-${CANONICAL_SHA}-"
+          err=$(mktemp)
+          trap 'rm -f "$err"' EXIT
+          if ! artifacts=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false) | "\(.id)\t\(.name)"' 2>"$err"); then
+            echo "skipping intermediate artifact cleanup (actions API unavailable or actions: write not granted): $(cat "$err")"
+            exit 0
+          fi
+          deleted=0
+          while IFS=$'\t' read -r id name; do
+            [ -n "$id" ] || continue
+            case "$name" in
+              "${prefix}"*) ;;
+              *) continue ;;
+            esac
+            if gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id" >/dev/null 2>"$err"; then
+              echo "deleted intermediate artifact $name ($id)"
+              deleted=$((deleted + 1))
+            else
+              echo "could not delete intermediate artifact $name ($id): $(cat "$err")"
+            fi
+          done <<< "$artifacts"
+          echo "cleaned up $deleted remaining intermediate artifact(s) for $CANONICAL_SHA"
+
   package-managers:
     needs: [check, build, publish]
     if: ${{ !cancelled() && (inputs.homebrew || inputs.scoop) && needs.check.result == 'success' && (needs.publish.result == 'success' || (needs.check.outputs.publish == 'false' && needs.build.result == 'skipped' && needs.publish.result == 'skipped')) }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Require caller-owned package-manager authorization
         run: |

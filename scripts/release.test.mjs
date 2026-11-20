@@ -276,6 +276,31 @@ test('workflow keeps required build success and verifies replacement before reti
   assert.doesNotMatch(workflow, /if ! npm view|if gh release view|find "artifacts/);
 });
 
+test('workflow clamps native artifact retention to 1 day, cleans up intermediate artifacts and reports OIDC 403 clearly', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const uploads = [...workflow.matchAll(/uses: actions\/upload-artifact@[^\n]+[\s\S]*?(?=\n      -\s|\n  [a-z][a-z-]*:|$)/g)];
+  assert.equal(uploads.length, 1);
+  for (const [block] of uploads) assert.match(block, /retention-days:\s*1\b/);
+  assert.doesNotMatch(workflow, /retention-days:\s*(?!1\b)\d+/);
+  assert.doesNotMatch(workflow, /^permissions:/m, 'top-level permissions must not clamp caller actions: write');
+  const section = (job) => workflow.slice(workflow.indexOf(`\n  ${job}:\n`) + 1).split(/\n  [a-z][a-z-]*:/)[0];
+  for (const job of ['check', 'build', 'docker', 'package-managers', 'registry-retired']) {
+    assert.match(section(job), /\n    permissions:\n/, `${job} keeps explicit minimal permissions`);
+  }
+  const publish = section('publish');
+  assert.doesNotMatch(publish, /\n    permissions:\n/, 'publish inherits optional caller actions: write without rejecting callers lacking it');
+  assert.match(publish, /npm publish --access public --provenance 2>&1/);
+  assert.match(publish, /OIDC permission denied/);
+  assert.match(publish, /::error::.*\$name@\$V.*\$GITHUB_REPOSITORY.*\.github\/workflows\/release\.yml/);
+  assert.match(publish, /- name: Delete intermediate native artifacts\n        if: always\(\)/);
+  assert.match(publish, /gh api -X DELETE "repos\/\$GITHUB_REPOSITORY\/actions\/artifacts\/\$id"/);
+  assert.match(publish, /KEEP_LINUX:/);
+  const dockerCleanup = section('cleanup-docker-artifacts');
+  assert.match(dockerCleanup, /needs: \[check, build, publish, docker\]/);
+  assert.match(dockerCleanup, /if: always\(\) && inputs\.docker-image != '' && needs\.check\.outputs\.docker-missing == 'true' && needs\.build\.result == 'success'/);
+  assert.match(dockerCleanup, /gh api -X DELETE "repos\/\$GITHUB_REPOSITORY\/actions\/artifacts\/\$id"/);
+});
+
 function legacyImageFixture(version, { stale = false, record = true, missing = false } = {}) {
   const documents = new Map();
   const store = (value) => {
