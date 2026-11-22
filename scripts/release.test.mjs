@@ -452,7 +452,9 @@ test('plain CLI manifests select only supported release targets without a regist
     assert.deepEqual(config.keys, keys);
     assert.equal(config.packages.length, 5);
     assert.equal(buildMatrix(config.keys).include.some((target) => target.os === 'windows-latest'), false);
-    assert.equal(buildMatrix(config.keys).include.find((target) => target.key === 'darwin-x64').os, 'macos-26-intel');
+    assert.deepEqual(buildMatrix(config.keys).include.find((target) => target.key === 'darwin-x64'), {
+      key: 'darwin-x64', os: 'macos-latest', target: 'x86_64-apple-darwin',
+    });
     const assets = requiredAssets('cli', '1.2.3', false, true, keys);
     assert.equal(assets.length, 8);
     assert.equal(assets.some((asset) => asset.includes('win32')), false);

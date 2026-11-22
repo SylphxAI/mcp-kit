@@ -17,7 +17,7 @@ export function buildMatrix(keys, linuxGlibc = "2.17") {
   if (!/^2\.\d+$/.test(linuxGlibc) || Number(linuxGlibc.split(".")[1]) < 17) throw new Error("invalid Linux glibc baseline");
   const targets = {
     'darwin-arm64': { os: 'macos-latest', target: 'aarch64-apple-darwin' },
-    'darwin-x64': { os: 'macos-26-intel', target: 'x86_64-apple-darwin' },
+    'darwin-x64': { os: 'macos-latest', target: 'x86_64-apple-darwin' },
     'linux-x64-gnu': { os: 'ubuntu-latest', target: 'x86_64-unknown-linux-gnu', zig: linuxGlibc },
     'linux-arm64-gnu': { os: 'ubuntu-latest', target: 'aarch64-unknown-linux-gnu', zig: linuxGlibc },
     'win32-x64-msvc': { os: 'windows-latest', target: 'x86_64-pc-windows-msvc', exe: '.exe' },

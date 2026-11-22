@@ -214,7 +214,8 @@ jobs:
       RELEASE_PLATFORMS: ${{ inputs.platforms }}
       VERSION_ARG: ${{ inputs.version-arg }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    # Leave time for artifact uploads and post-job cache saves.
+    timeout-minutes: 45
     strategy:
       fail-fast: true
       matrix: ${{ fromJSON(needs.check.outputs.matrix) }}
@@ -271,8 +272,18 @@ jobs:
           actual_source=$(git rev-parse HEAD)
           test "$actual_source" = "$CANONICAL_SHA"
           node .mcp-kit/scripts/release.mjs identity "${{ matrix.key }}"
+      - name: Verify Intel macOS binary (Apple Silicon runner)
+        if: matrix.key == 'darwin-x64' && runner.arch == 'ARM64'
+        shell: bash
+        env:
+          BIN: ${{ inputs.name }}
+        run: |
+          set -euo pipefail
+          archs=$(xcrun lipo -archs "./out/$BIN")
+          test "$archs" = x86_64
       - name: Run it (native targets)
-        if: matrix.key != 'linux-arm64-gnu'
+        # Do not rely on Rosetta being installed on Apple Silicon runners.
+        if: matrix.key != 'linux-arm64-gnu' && (matrix.key != 'darwin-x64' || runner.arch == 'X64')
         shell: bash
         run: node .mcp-kit/scripts/release.mjs version "./out/${{ inputs.name }}${{ matrix.exe }}"
       - uses: actions/upload-artifact@v4
