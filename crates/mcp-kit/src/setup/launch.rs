@@ -175,8 +175,9 @@ mod tests {
     }
 
     fn file(root: &Path, bin_dir: &str) -> PathBuf {
-        let path = root
-            .join(bin_dir)
+        let path = bin_dir
+            .split('/')
+            .fold(root.to_path_buf(), |path, dir| path.join(dir))
             .join(format!("app{}", std::env::consts::EXE_SUFFIX));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "").unwrap();
