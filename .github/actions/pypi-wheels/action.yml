@@ -1,0 +1,77 @@
+name: Build or verify PyPI wheels
+description: Package the caller's tagged native release or verify its five wheels on PyPI.
+inputs:
+  mode:
+    description: 'build (package and smoke-test) or verify (read back from PyPI).'
+    required: true
+  name:
+    description: PyPI distribution and native executable name (without .exe).
+    required: true
+  package-json:
+    description: Caller workspace path to package.json, used to select the release version.
+    required: true
+  summary:
+    description: One-line PyPI description (required in build mode).
+  homepage:
+    description: Project homepage URL (required in build mode).
+  source-url:
+    description: Project source URL for PyPI metadata (required in build mode).
+  readme:
+    description: Path to the Markdown README in the tagged source.
+    default: README.md
+  license-expression:
+    description: Optional SPDX expression for the tagged license (for example MIT).
+  license-file:
+    description: Path to the license file in the tagged source.
+    default: LICENSE
+  out-dir:
+    description: Empty output directory for the upload set.
+    default: dist
+  keywords:
+    description: Comma-separated keywords for PyPI metadata.
+  classifiers:
+    description: Newline-separated PyPI classifiers.
+  python-package-dir:
+    description: Tagged directory containing the optional import package (for example packages/pypi).
+  extras:
+    description: Newline-separated extra=requirement entries for PyPI metadata.
+  smoke-command:
+    description: Trusted shell command in the smoke venv, run from the caller workspace. Defaults to <name> --version.
+  require-sha256sums:
+    description: Require the tagged release to have SHA256SUMS (always checked when present).
+    default: 'false'
+  attestation-workflow:
+    description: Optional caller workflow path whose attestation must bind each archive to the tag commit.
+outputs:
+  built:
+    description: 'In build mode: true if ready to upload, false if already complete.'
+    value: ${{ steps.wheels.outputs.built }}
+  version:
+    description: Selected PyPI version in either mode.
+    value: ${{ steps.wheels.outputs.version }}
+runs:
+  using: composite
+  steps:
+    - name: Process PyPI wheels
+      id: wheels
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        WHEELS_MODE: ${{ inputs.mode }}
+        WHEELS_NAME: ${{ inputs.name }}
+        WHEELS_PACKAGE_JSON: ${{ inputs.package-json }}
+        WHEELS_SUMMARY: ${{ inputs.summary }}
+        WHEELS_HOMEPAGE: ${{ inputs.homepage }}
+        WHEELS_SOURCE_URL: ${{ inputs.source-url }}
+        WHEELS_README: ${{ inputs.readme }}
+        WHEELS_LICENSE_FILE: ${{ inputs.license-file }}
+        WHEELS_LICENSE_EXPRESSION: ${{ inputs.license-expression }}
+        WHEELS_OUT_DIR: ${{ inputs.out-dir }}
+        WHEELS_KEYWORDS: ${{ inputs.keywords }}
+        WHEELS_CLASSIFIERS: ${{ inputs.classifiers }}
+        WHEELS_PYTHON_PACKAGE_DIR: ${{ inputs.python-package-dir }}
+        WHEELS_EXTRAS: ${{ inputs.extras }}
+        WHEELS_SMOKE_COMMAND: ${{ inputs.smoke-command }}
+        WHEELS_REQUIRE_SHA256SUMS: ${{ inputs.require-sha256sums }}
+        WHEELS_ATTESTATION_WORKFLOW: ${{ inputs.attestation-workflow }}
+      run: python3 "$GITHUB_ACTION_PATH/../../../scripts/pypi-wheels.py" "$WHEELS_MODE"

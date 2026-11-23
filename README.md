@@ -251,6 +251,70 @@ The composite inputs `homebrew-tap` and `scoop-bucket` default to empty (disable
 
 Users: `brew install SylphxAI/tap/<name>`, `scoop bucket add sylphx https://github.com/SylphxAI/scoop-bucket && scoop install <name>`. The rendering lives in `scripts/package-managers.mjs`.
 
+### PyPI wheels
+
+Run the [`pypi-wheels` composite action](.github/actions/pypi-wheels/action.yml)
+from the caller's own `.github/workflows/release.yml` after its GitHub release
+job succeeds. Pin both calls to the same `mcp-kit` commit. Configure the PyPI
+Trusted Publisher for the **caller** repository, workflow `release.yml`, and
+environment `pypi`. The composite builds and verifies; the official PyPA action
+publishes using GitHub OIDC. No PyPI API token is needed.
+
+```yaml
+  pypi:
+    needs: release
+    if: ${{ !cancelled() && github.event.repository.private == false && github.ref == 'refs/heads/main' && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: SylphxAI/mcp-kit/.github/actions/pypi-wheels@<mcp-kit-commit>
+        id: wheels
+        with:
+          mode: build
+          name: example-cli
+          package-json: packages/example-cli/package.json
+          summary: A native CLI
+          homepage: https://example.com
+          source-url: https://github.com/example/example-cli
+          license-expression: MIT
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        if: steps.wheels.outputs.built == 'true'
+        with:
+          packages-dir: dist
+          skip-existing: true
+      - uses: SylphxAI/mcp-kit/.github/actions/pypi-wheels@<mcp-kit-commit>
+        with:
+          mode: verify
+          name: example-cli
+          package-json: packages/example-cli/package.json
+```
+
+Build needs a checkout on Linux x86-64 with Python 3.11+, `venv`, Git and `gh`.
+It reads the caller's `package.json` version and takes the README, license and
+optional Python payload from the exact `v<version>` tag. A complete five-wheel
+set skips the build. To recover a partial delivery, the action rebuilds the full
+set and the publisher skips existing files. If an expected filename was yanked,
+un-yank it or release a new version; PyPI does not let you reuse that filename.
+
+Set `python-package-dir` to include the Python import package (the normalized
+wheel name), and `extras` to one `extra=requirement` per line. A custom
+`smoke-command` runs from the caller checkout with the installed CLI and
+Python on `PATH` and the selected version in `WHEEL_VERSION`.
+
+The action checks GitHub's asset digests when available and verifies
+`SHA256SUMS` whenever present. Set `require-sha256sums: true` when the upstream
+release must provide the manifest. To also verify native attestations against
+the tag commit, set `attestation-workflow: .github/workflows/release.yml` and
+grant `attestations: read` to the build job. When build and publish run in
+separate jobs, grant `id-token: write` only to the publisher and keep the
+`environment: pypi` on that caller job.
+
 The selected Cargo package, npm manifests and `server.json` must carry the same version and publication identity. Executable native targets must report that exact version. Every native artifact carries its platform, version, source and binary SHA-256; staging checks these before publishing, including cross-compiled targets.
 
 A version has one canonical repository commit, established from original platform identities and published native source revisions; conflicting sources stop the run. Recovery preserves the original platform identity and verifies its binary digest, version and canonical source. GitHub archives require a digest-verified original identity asset; npm fallback requires registry integrity, the embedded manifest and original identity, with a matching registry source revision. Already-complete legacy releases remain verified no-ops: every native, launcher and alias must share an immutable npm source revision, the exact MCP Registry version must be active, and all five archives and requested bundles must exist. No new sidecars or build provenance are manufactured. A requested legacy GHCR image must have both digest-verified Linux architectures and an established GitHub Packages version record binding the exact version tag to its index digest; this verifies existing delivery, not native-source provenance. Any conflicting version label fails. When recovery is needed, missing GitHub sidecars are not proof of a legacy release: the planner first verifies available npm tarball integrity, embedded manifests and original native identities against the shared canonical source. Interrupted modern deliveries resume using those original identities. Legacy partial releases without original identities fail closed when a requested channel needs recovery, rather than relabelling or overwriting old bytes. Missing natives compile from the canonical commit, not a later same-version main commit. GHCR readback verifies digest-addressed child manifests and configs for both architectures, checking version, canonical revision, source and native digests; an existing stale version tag is an error. Authorized GitHub package metadata confirms first-image absence; token denials never mean absent. Old MCP Registry names are retired only after the replacement's exact version is verified available, including otherwise complete no-op runs.
