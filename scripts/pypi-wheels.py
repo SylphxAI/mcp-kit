@@ -30,6 +30,7 @@ PLATFORMS = {
 }
 VERIFY_DELAYS = (0, 5, 10, 20, 30)
 SHA256SUMS = "SHA256SUMS"
+PACKAGE_NAME = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
 
 
 def input_value(name, default=""):
@@ -55,8 +56,12 @@ def version_from(contents):
     return version
 
 
+def normalized_name(name):
+    return re.sub(r"[-_.]+", "_", name).lower()
+
+
 def wheel_stem(name, version):
-    return f"{re.sub(r'[-_.]+', '_', name).lower()}-{version}"
+    return f"{normalized_name(name)}-{version}"
 
 
 def wheel_name(name, version, tag):
@@ -64,7 +69,7 @@ def wheel_name(name, version, tag):
 
 
 def pypi_state(name, version):
-    """Return missing and yanked filenames for the exact version, not latest."""
+    """Check the exact version’s wheel set and return missing and yanked filenames."""
     expected = {wheel_name(name, version, tag) for tag in PLATFORMS.values()}
     missing = expected.copy()
     yanked = set()
@@ -82,6 +87,8 @@ def pypi_state(name, version):
     for file in files:
         filename = file["filename"]
         if filename not in expected:
+            if file["packagetype"] == "bdist_wheel" or filename.lower().endswith(".whl"):
+                raise ValueError(f"unexpected PyPI wheel: {filename}")
             continue
         if (filename in seen or file["packagetype"] != "bdist_wheel"
                 or type(file["yanked"]) is not bool
@@ -132,12 +139,15 @@ def download_asset(repo, asset, path):
     asset_id = asset["id"]
     if type(asset_id) is not int or asset_id <= 0 or asset["state"] != "uploaded":
         raise ValueError(f"release asset is not uploaded: {path.name}")
+    expected_digest = asset.get("digest")
+    if not isinstance(expected_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest):
+        raise ValueError(f"missing or invalid GitHub asset SHA-256 digest: {path.name}")
     with path.open("wb") as output:
         subprocess.run(["gh", "api", f"repos/{repo}/releases/assets/{asset_id}",
                         "-H", "Accept: application/octet-stream"], stdout=output, check=True)
     with path.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
-    if asset.get("digest") is not None and asset["digest"] != f"sha256:{digest}":
+    if expected_digest != f"sha256:{digest}":
         raise ValueError(f"GitHub asset digest mismatch: {path.name}")
     if path.stat().st_size != asset["size"] or not asset["size"]:
         raise ValueError(f"GitHub asset size mismatch: {path.name}")
@@ -314,10 +324,10 @@ def smoke_wheels(work, paths, linux_wheel, name, version, command):
     subprocess.run([python, "-m", "twine", "check", "--strict", *map(str, paths)], env=env, check=True)
 
 
-def build(name, version, package_json):
-    missing, yanked = pypi_state(name, version)
+def build(name, pypi_name, version, package_json):
+    missing, yanked = pypi_state(pypi_name, version)
     if not missing:
-        print(f"All five wheels for {name} {version} already exist on PyPI.")
+        print(f"All five wheels for {pypi_name} {version} already exist on PyPI.")
         return False
     if yanked:
         raise ValueError("PyPI filenames cannot be reused; unyank or release a new version: " + ", ".join(sorted(yanked)))
@@ -345,13 +355,12 @@ def build(name, version, package_json):
         if version_from(files[package_json]) != version:
             raise ValueError("tagged package.json version does not match caller version")
         print(f"Packaging {repo}@{commit} (v{version}).", flush=True)
-        metadata_bytes = metadata(name, version, files[readme])
-        module = wheel_stem(name, version).rsplit("-", 1)[0]
-        package = package_files(files, directory, module) if directory else {}
-        wheels = [write_wheel(work, name, version, tag, exe, read_binary(path, exe),
+        metadata_bytes = metadata(pypi_name, version, files[readme])
+        package = package_files(files, directory, normalized_name(name)) if directory else {}
+        wheels = [write_wheel(work, pypi_name, version, tag, exe, read_binary(path, exe),
                               metadata_bytes, files[license_file], package)
                   for tag, exe, path in native_archives(repo, name, version, work, require_sums == "true", workflow, commit)]
-        linux_wheel = work / wheel_name(name, version, PLATFORMS["linux-x64-gnu"])
+        linux_wheel = work / wheel_name(pypi_name, version, PLATFORMS["linux-x64-gnu"])
         smoke_wheels(work, wheels, linux_wheel, name, version, input_value("smoke-command", f"{name} --version"))
         out.mkdir(parents=True, exist_ok=True)
         # Exclusive writes avoid overwriting an existing caller file.
@@ -367,15 +376,18 @@ def main():
     args = parser.parse_args()
     try:
         name = input_value("name")
-        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", name):
-            raise ValueError("invalid PyPI distribution and executable name")
+        pypi_name = input_value("pypi-name", name)
+        if not PACKAGE_NAME.fullmatch(name):
+            raise ValueError("invalid executable name")
+        if not PACKAGE_NAME.fullmatch(pypi_name):
+            raise ValueError("invalid PyPI distribution name")
         package_json = source_path(input_value("package-json"))
         version = version_from(Path(package_json).read_bytes())
         outputs = {"version": version}
         if args.mode == "build":
-            outputs["built"] = str(build(name, version, package_json)).lower()
+            outputs["built"] = str(build(name, pypi_name, version, package_json)).lower()
         else:
-            verify_pypi(name, version)
+            verify_pypi(pypi_name, version)
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             output.writelines(f"{key}={value}\n" for key, value in outputs.items())
     except (OSError, ValueError, KeyError, TypeError, tarfile.TarError, zipfile.BadZipFile, subprocess.SubprocessError) as error:

@@ -5,8 +5,10 @@ inputs:
     description: 'build (package and smoke-test) or verify (read back from PyPI).'
     required: true
   name:
-    description: PyPI distribution and native executable name (without .exe).
+    description: Native release asset and executable name (without .exe).
     required: true
+  pypi-name:
+    description: PyPI distribution name. Defaults to name when omitted.
   package-json:
     description: Caller workspace path to package.json, used to select the release version.
     required: true
@@ -59,6 +61,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
         WHEELS_MODE: ${{ inputs.mode }}
         WHEELS_NAME: ${{ inputs.name }}
+        WHEELS_PYPI_NAME: ${{ inputs.pypi-name }}
         WHEELS_PACKAGE_JSON: ${{ inputs.package-json }}
         WHEELS_SUMMARY: ${{ inputs.summary }}
         WHEELS_HOMEPAGE: ${{ inputs.homepage }}
