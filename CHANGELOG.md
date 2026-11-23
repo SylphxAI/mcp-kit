@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.16
+
+- Let setup register a persistent executable or a uvx command for PyPI installs, without requiring Node.js. Existing npm registrations and the original Server API keep their defaults.
+
 ## 0.8.14
 
 - Clamp intermediate native release artifact retention to 1 day and delete each cut's `native-<sha>-*` artifacts immediately at the end of `publish` (and after `docker` when enabled) when the caller grants `actions: write`. Emit a direct `::error::` naming the npm package, repository and `.github/workflows/release.yml` Trusted Publisher requirement on HTTP 403 / OIDC permission denied without retrying.

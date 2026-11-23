@@ -94,11 +94,17 @@ let server = Server { name: "repomap".into(), package: "@sylphx/repomap".into(),
 run(&server, &Options { dry_run: false, remove: false, clients: None })?;
 ```
 
+For a CLI also distributed as a native binary or a Python wheel, call `setup::run_detected(&server, &options, "repomap", Some("sylphx-repomap"))` instead. Pass the executable name separately from the PyPI distribution name. For a native binary without a PyPI distribution, pass `None`.
+
+- A persistent installation registers an absolute executable path, so the editor does not need the setup shell's `PATH` or an active virtual environment.
+- A tool running from uv's cache registers `uvx`, not the cached executable. For different names, it uses `uvx --from sylphx-repomap repomap mcp`. Make `uvx` available on the client's `PATH`.
+- npm installations still register `npx -y <package> <args…>` (through `cmd /c` on Windows). `Server::launch` and `setup::run` retain the npm default for existing callers.
+
 Supported clients:
 
 | Client | Where the entry is written |
 |---|---|
-| Claude Code | `claude mcp add --scope user`, or `~/.claude.json` |
+| Claude Code | User config (`~/.claude.json` or `$CLAUDE_CONFIG_DIR/.claude.json` with `run_detected`) |
 | Codex | `~/.codex/config.toml` |
 | Cursor | `~/.cursor/mcp.json` |
 | VS Code (and Insiders) | the user `mcp.json` |

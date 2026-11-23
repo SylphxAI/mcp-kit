@@ -7,6 +7,8 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod launch;
+
 /// The server to register: `npx -y <package> <args…>` under `name`.
 #[derive(Debug, Clone)]
 pub struct Server {
@@ -16,7 +18,7 @@ pub struct Server {
 }
 
 impl Server {
-    /// The launch command. On Windows, `npx` runs through `cmd /c`.
+    /// The npm launch command. On Windows, `npx` runs through `cmd /c`.
     pub fn launch(&self) -> (String, Vec<String>) {
         let mut base = vec!["-y".to_string(), self.package.clone()];
         base.extend(self.args.iter().cloned());
@@ -27,6 +29,17 @@ impl Server {
         } else {
             ("npx".into(), base)
         }
+    }
+
+    /// Pick a launch command for the current installation. Pass the native
+    /// executable's name and, if published on PyPI, the distribution name.
+    /// Persistent installs use an absolute path so the client does not need
+    /// the setup shell's PATH. npm installs keep the npm launch command.
+    pub fn launch_detected(&self, binary: &str, pypi_package: Option<&str>) -> (String, Vec<String>) {
+        launch::detect(
+            self, binary, pypi_package, std::env::current_exe().ok().as_deref(),
+            &launch::path_entries(), launch::uv_cache().as_deref(),
+        )
     }
 }
 
@@ -61,20 +74,13 @@ struct Client {
 
 /// Whether `bin` is on PATH.
 pub fn on_path(bin: &str) -> bool {
-    let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| exts.iter().any(|e| d.join(format!("{bin}{e}")).is_file())))
+    launch::candidates(bin, &launch::path_entries()).any(|p| p.is_file())
 }
 
-/// Whether `bin` is installed to stay: npx puts a temporary shim on PATH,
-/// which must never be written into a client's settings.
+/// Whether `bin` is on PATH outside temporary npm and uv environments.
 pub fn installed(bin: &str) -> bool {
-    let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
-    std::env::var_os("PATH").is_some_and(|p| {
-        std::env::split_paths(&p).any(|d| {
-            let s = d.to_string_lossy();
-            !s.contains("_npx") && !s.contains("npm-cache") && !s.contains("/.npm/") && exts.iter().any(|e| d.join(format!("{bin}{e}")).is_file())
-        })
-    })
+    let cache = launch::uv_cache();
+    launch::candidates(bin, &launch::path_entries()).any(|p| p.is_file() && launch::persistent(&p, cache.as_deref()))
 }
 
 fn clients(home: &Path, config: &Path, codex_on_path: bool) -> Vec<Client> {
@@ -116,9 +122,30 @@ pub enum Change {
 /// Unknown client IDs are errors before any configuration is changed.
 /// Returns how many clients changed, printing one line per client.
 pub fn run(server: &Server, opts: &Options) -> Result<usize> {
+    run_with(server, opts, || server.launch(), false)
+}
+
+/// Like `run`, but pick a launch command for the current installation.
+/// Pass the executable name and optionally its PyPI distribution name.
+/// Rerunning setup also updates an existing user-scoped Claude Code stdio
+/// entry, without launching the old command to check whether it works.
+pub fn run_detected(server: &Server, opts: &Options, binary: &str, pypi_package: Option<&str>) -> Result<usize> {
+    run_with(server, opts, || server.launch_detected(binary, pypi_package), true)
+}
+
+fn run_with(
+    server: &Server,
+    opts: &Options,
+    launch: impl FnOnce() -> (String, Vec<String>),
+    edit_claude_config: bool,
+) -> Result<usize> {
     let home = dirs::home_dir().unwrap_or_default();
     let config = dirs::config_dir().unwrap_or_else(|| home.join(".config"));
-    run_in(server, opts, &home, &config, on_path)
+    let claude = edit_claude_config.then(|| {
+        std::env::var_os("CLAUDE_CONFIG_DIR").filter(|p| !p.is_empty())
+            .map_or_else(|| home.clone(), PathBuf::from).join(".claude.json")
+    });
+    run_in(server, opts, &home, &config, on_path, launch, claude.as_deref())
 }
 
 fn validate_client_ids(ids: &[String], clients: &[Client]) -> Result<()> {
@@ -145,23 +172,31 @@ fn run_in(
     home: &Path,
     config: &Path,
     on_path: impl Fn(&str) -> bool,
+    launch: impl FnOnce() -> (String, Vec<String>),
+    claude_config: Option<&Path>,
 ) -> Result<usize> {
     let clients = clients(home, config, on_path("codex"));
     if let Some(ids) = &opts.clients {
         validate_client_ids(ids, &clients)?;
     }
 
-    let (cmd, args) = server.launch();
+    let (cmd, args) = if opts.remove { (String::new(), Vec::new()) } else { launch() };
     let mut touched = 0;
     let mut found = 0;
-    for c in clients {
+    for mut c in clients {
+        if let Some(path) = claude_config.filter(|_| c.id == "claude-code") {
+            c.config = path.into();
+            if c.config.is_file() || on_path("claude") {
+                c.detect = home.into();
+            }
+        }
         match &opts.clients {
             Some(only) if !only.iter().any(|o| o == c.id) => continue,
             None if !c.detect.exists() => continue,
             _ => {}
         }
         found += 1;
-        let res = if c.id == "claude-code" && on_path("claude") {
+        let res = if c.id == "claude-code" && claude_config.is_none() && on_path("claude") {
             claude_cli(&server.name, &cmd, &args, opts)
         } else if c.format == Format::CodexToml {
             edit_codex(&c.config, &server.name, &cmd, &args, opts)
@@ -178,8 +213,12 @@ fn run_in(
         }
     }
     if found == 0 {
-        println!("  No MCP clients detected. Add this to your client's MCP config:");
-        println!("  {{\"mcpServers\": {{\"{}\": {{\"command\": \"{cmd}\", \"args\": {}}}}}}}", server.name, serde_json::to_string(&args)?);
+        if opts.remove {
+            println!("  No MCP clients detected.");
+        } else {
+            println!("  No MCP clients detected. Add this to your client's MCP config:");
+            println!("{}", json!({"mcpServers": { &server.name: {"command": cmd, "args": args}}}));
+        }
     }
     Ok(touched)
 }
@@ -227,12 +266,23 @@ fn edit_json(path: &Path, fmt: Format, name: &str, cmd: &str, args: &[String], o
     let obj = root.as_object_mut().ok_or_else(|| anyhow!("{} is not a JSON object", path.display()))?;
     let servers = obj.entry(key).or_insert_with(|| Value::Object(Map::new()));
     let servers = servers.as_object_mut().ok_or_else(|| anyhow!("`{key}` is not an object"))?;
-    let want = entry(fmt, cmd, args);
     if opts.remove {
         if servers.remove(name).is_none() {
             return Ok(Change::Unchanged);
         }
     } else {
+        let mut want = entry(fmt, cmd, args);
+        if let Some(existing) = servers.get(name).filter(|v| fmt == Format::ClaudeJson && v.is_object()) {
+            // An existing stdio entry may have its own environment settings.
+            // A different transport is not an old registration from this setup.
+            if existing.get("type").is_some_and(|t| t != "stdio") || existing.get("url").is_some() {
+                return Ok(Change::Unchanged);
+            }
+            want = existing.clone();
+            want["type"] = json!("stdio");
+            want["command"] = json!(cmd);
+            want["args"] = json!(args);
+        }
         if servers.get(name) == Some(&want) {
             return Ok(Change::Unchanged);
         }
@@ -380,7 +430,7 @@ mod tests {
             clients: ids.map(|ids| ids.iter().map(|id| (*id).into()).collect()),
             ..Default::default()
         };
-        run_in(&server, &opts, home, &home.join("config"), |_| false)
+        run_in(&server, &opts, home, &home.join("config"), |_| false, || server.launch(), None)
     }
 
     #[test]
@@ -485,6 +535,8 @@ mod tests {
                 home.path(),
                 &home.path().join("config"),
                 |_| false,
+                || server.launch(),
+                None,
             )
         };
         assert_eq!(run(&opts).unwrap(), 1);
@@ -503,6 +555,44 @@ mod tests {
             json!({"mcpServers": {"other": {"command": "other"}}}),
         );
         assert_eq!(run(&opts).unwrap(), 0);
+    }
+
+    #[test]
+    fn detected_setup_replaces_stale_claude_command_without_losing_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join("custom claude/.claude.json");
+        let cursor = home.path().join(".cursor/mcp.json");
+        let server = Server { name: "app".into(), package: "@example/app".into(), args: vec!["mcp".into()] };
+        let old = json!({"mcpServers": {
+            "app": {"type": "stdio", "command": "npx", "args": ["-y", "@example/app", "mcp"], "env": {"MODE": "local"}},
+            "other": {"type": "http", "url": "https://example.com/mcp"}
+        }, "retained": true});
+        write_json(&claude, &old).unwrap();
+        write_json(&cursor, &old).unwrap();
+        let mut opts = Options { clients: Some(vec!["claude-code".into()]), dry_run: true, remove: false };
+        let run = |opts: &Options| run_in(
+            &server, opts, home.path(), home.path(), |bin| bin == "claude",
+            || { assert!(!opts.remove); ("uvx".into(), vec!["app".into(), "mcp".into()]) }, Some(&claude),
+        ).unwrap();
+        assert_eq!(run(&opts), 1);
+        assert_eq!(read_json(&claude).unwrap(), old);
+        opts.dry_run = false;
+        assert_eq!(run(&opts), 1);
+        let mut expected = old.clone();
+        expected["mcpServers"]["app"]["command"] = json!("uvx");
+        expected["mcpServers"]["app"]["args"] = json!(["app", "mcp"]);
+        assert_eq!(read_json(&claude).unwrap(), expected);
+        assert_eq!(run(&opts), 0);
+        opts.remove = true;
+        opts.dry_run = true;
+        assert_eq!(run(&opts), 1);
+        assert_eq!(read_json(&claude).unwrap(), expected);
+        opts.dry_run = false;
+        assert_eq!(run(&opts), 1);
+        assert_eq!(run(&opts), 0);
+        expected["mcpServers"].as_object_mut().unwrap().remove("app");
+        assert_eq!(read_json(&claude).unwrap(), expected);
+        assert_eq!(read_json(&cursor).unwrap(), old);
     }
 
     fn tmp(name: &str) -> PathBuf {
