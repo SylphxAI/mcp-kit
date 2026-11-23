@@ -283,8 +283,9 @@ mod tests {
     #[test]
     fn explicit_uv_cache_and_symlink_do_not_count_as_installed() {
         let temp = tempfile::tempdir().unwrap();
-        let cache = temp.path().join("custom");
         let exe = file(temp.path(), "custom/other/bin");
+        // Same normalization as uv_cache(), including macOS /var -> /private/var.
+        let cache = temp.path().join("custom").canonicalize().unwrap();
         assert!(!persistent(&exe, Some(&cache)));
         assert_eq!(
             detect(&server(), "app", Some("app"), Some(&exe), &[], Some(&cache)).0,
