@@ -297,10 +297,12 @@ publishes using GitHub OIDC. No PyPI API token is needed.
 
 Build needs a checkout on Linux x86-64 with Python 3.11+, `venv`, Git and `gh`.
 It reads the caller's `package.json` version and takes the README, license and
-optional Python payload from the exact `v<version>` tag. A complete five-wheel
-set skips the build. To recover a partial delivery, the action rebuilds the full
-set and the publisher skips existing files. If an expected filename was yanked,
-un-yank it or release a new version; PyPI does not let you reuse that filename.
+optional Python payload from the exact `v<version>` tag. The tagged
+`package.json` must report the same version; the action does not read Cargo
+metadata. The exact five-wheel set skips the build, and unexpected wheels fail
+verification. To recover a partial delivery, the action rebuilds the full set
+and the publisher skips existing files. If an expected filename was yanked,
+unyank it or release a new version; PyPI does not let you reuse that filename.
 
 If the PyPI distribution name differs from the executable, pass `pypi-name`
 to both build and verify and configure the Trusted Publisher for that PyPI
@@ -312,8 +314,8 @@ not `pypi-name`), and `extras` to one `extra=requirement` per line. A custom
 `smoke-command` runs from the caller checkout with the installed CLI and
 Python on `PATH` and the selected version in `WHEEL_VERSION`.
 
-The action checks GitHub's asset digests when available and verifies
-`SHA256SUMS` whenever present. Set `require-sha256sums: true` when the upstream
+The action requires and checks GitHub’s SHA-256 digest for each downloaded
+asset and verifies `SHA256SUMS` whenever present. Set `require-sha256sums: true` when the upstream
 release must provide the manifest. To also verify native attestations against
 the tag commit, set `attestation-workflow: .github/workflows/release.yml` and
 grant `attestations: read` to the build job. When build and publish run in

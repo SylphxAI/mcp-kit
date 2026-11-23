@@ -285,6 +285,25 @@ class BuildTest(unittest.TestCase):
         self.smoke.assert_not_called()
         self.assertFalse(self.out.exists())
 
+    def test_missing_or_invalid_asset_digest_fails_before_downloading_asset(self):
+        self.assets["SHA256SUMS"] = self.sums.encode()
+        for name in ("sample-darwin-arm64.tar.gz", "SHA256SUMS"):
+            for bad_digest in ({}, {"digest": None}, {"digest": "sha256:invalid"}):
+                with self.subTest(name=name, digest=bad_digest):
+                    release = json.loads(self.release_json(["gh", "api", f"repos/{REPO}/releases/tags/v{VERSION}"]))
+                    asset = next(asset for asset in release["assets"] if asset["name"] == name)
+                    del asset["digest"]
+                    asset.update(bad_digest)
+                    self.api.side_effect = None
+                    self.api.return_value = json.dumps(release)
+                    self.commands.reset_mock()
+                    with self.assertRaisesRegex(ValueError, f"missing or invalid GitHub asset SHA-256 digest: {name}"):
+                        self.build()
+                    self.assertNotIn(self.ids[name], [int(call.args[0][2].rsplit("/", 1)[1])
+                                                      for call in self.commands.call_args_list])
+        self.smoke.assert_not_called()
+        self.assertFalse(self.out.exists())
+
     def test_download_changed_since_api_read_refuses(self):
         original = self.release_json(["gh", "api", f"repos/{REPO}/releases/tags/v{VERSION}"])
         self.api.side_effect = None
@@ -352,6 +371,17 @@ class VerifyTest(unittest.TestCase):
              patch.object(wheels.time, "sleep"), self.assertRaisesRegex(ValueError, "missing or yanked.*x86_64"):
             wheels.verify_pypi(NAME, VERSION)
         self.assertEqual(probe.call_count, 5)
+
+    def test_extra_wheel_rejects_even_a_complete_set(self):
+        entries = [wheel_entry(filename) for filename in EXPECTED]
+        extra = wheel_entry("sample-1.2.3-py3-none-win_arm64.whl", yanked=True)
+        for entry in (extra, dict(extra, packagetype="sdist")):
+            with self.subTest(entry=entry), \
+                 patch.object(wheels.urllib.request, "urlopen", return_value=registry([*entries, entry])), \
+                 patch.object(wheels.time, "sleep") as sleep, \
+                 self.assertRaisesRegex(ValueError, "unexpected PyPI wheel: .*win_arm64"):
+                wheels.verify_pypi(NAME, VERSION)
+            sleep.assert_not_called()
 
     def test_malformed_registry_wheel_fails_immediately(self):
         entry = wheel_entry(LINUX_X64) | {"digests": {"sha256": "invalid"}}

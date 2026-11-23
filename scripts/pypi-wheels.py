@@ -69,7 +69,7 @@ def wheel_name(name, version, tag):
 
 
 def pypi_state(name, version):
-    """Return missing and yanked filenames for the exact version, not latest."""
+    """Check the exact version’s wheel set and return missing and yanked filenames."""
     expected = {wheel_name(name, version, tag) for tag in PLATFORMS.values()}
     missing = expected.copy()
     yanked = set()
@@ -87,6 +87,8 @@ def pypi_state(name, version):
     for file in files:
         filename = file["filename"]
         if filename not in expected:
+            if file["packagetype"] == "bdist_wheel" or filename.lower().endswith(".whl"):
+                raise ValueError(f"unexpected PyPI wheel: {filename}")
             continue
         if (filename in seen or file["packagetype"] != "bdist_wheel"
                 or type(file["yanked"]) is not bool
@@ -137,12 +139,15 @@ def download_asset(repo, asset, path):
     asset_id = asset["id"]
     if type(asset_id) is not int or asset_id <= 0 or asset["state"] != "uploaded":
         raise ValueError(f"release asset is not uploaded: {path.name}")
+    expected_digest = asset.get("digest")
+    if not isinstance(expected_digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest):
+        raise ValueError(f"missing or invalid GitHub asset SHA-256 digest: {path.name}")
     with path.open("wb") as output:
         subprocess.run(["gh", "api", f"repos/{repo}/releases/assets/{asset_id}",
                         "-H", "Accept: application/octet-stream"], stdout=output, check=True)
     with path.open("rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
-    if asset.get("digest") is not None and asset["digest"] != f"sha256:{digest}":
+    if expected_digest != f"sha256:{digest}":
         raise ValueError(f"GitHub asset digest mismatch: {path.name}")
     if path.stat().st_size != asset["size"] or not asset["size"]:
         raise ValueError(f"GitHub asset size mismatch: {path.name}")
