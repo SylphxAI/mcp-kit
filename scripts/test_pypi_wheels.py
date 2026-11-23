@@ -134,7 +134,38 @@ class BuildTest(unittest.TestCase):
         self.assertFalse(self.out.exists(), "publish directory must not be ready before smoke")
 
     def build(self):
-        return wheels.build(NAME, VERSION, PACKAGE_JSON)
+        return wheels.build(NAME, NAME, VERSION, PACKAGE_JSON)
+
+    def test_distribution_alias_keeps_native_archive_executable_and_import_names(self):
+        self.source["python/sample/__init__.py"] = b"# import sample"
+        expected = {filename.replace("sample-", "vendor_sample-", 1) for filename in EXPECTED}
+        linux_wheel = LINUX_X64.replace("sample-", "vendor_sample-", 1)
+        self.registry.side_effect = None
+        self.registry.return_value = registry([wheel_entry(linux_wheel)])
+        result = self.root / "outputs"
+        real_read_bytes = Path.read_bytes
+        with patch.dict(os.environ, {"WHEELS_NAME": NAME, "WHEELS_PYPI_NAME": "vendor-sample",
+                                     "WHEELS_PACKAGE_JSON": PACKAGE_JSON, "WHEELS_PYTHON_PACKAGE_DIR": "python",
+                                     "GITHUB_OUTPUT": str(result)}), \
+             patch.object(sys, "argv", ["script", "build"]), \
+             patch.object(Path, "read_bytes", autospec=True,
+                          side_effect=lambda path: self.source[PACKAGE_JSON] if path == Path(PACKAGE_JSON) else real_read_bytes(path)):
+            self.smoke.side_effect = None
+            self.assertEqual(wheels.main(), 0)
+        self.assertEqual(result.read_text(encoding="utf-8"), "version=1.2.3\nbuilt=true\n")
+        self.assertEqual(self.registry.call_args.args[0].full_url, "https://pypi.org/pypi/vendor-sample/json")
+        work, paths, linux, name, version, command = self.smoke.call_args.args
+        self.assertEqual({p.name for p in paths}, expected)
+        self.assertEqual((linux, name, version, command), (work / linux_wheel, NAME, VERSION, "sample --version"))
+        self.assertEqual({p.name for p in self.out.iterdir()}, expected)
+        for archive, original in NATIVE_FILES.items():
+            filename = original.replace("sample-", "vendor_sample-", 1)
+            with self.subTest(filename=filename), zipfile.ZipFile(self.out / filename) as wheel:
+                exe = "sample.exe" if filename.endswith("win_amd64.whl") else "sample"
+                self.assertEqual(wheel.read(f"vendor_sample-1.2.3.data/scripts/{exe}"), archive.encode())
+                meta = BytesParser().parsebytes(wheel.read("vendor_sample-1.2.3.dist-info/METADATA"))
+                self.assertEqual(meta["Name"], "vendor-sample")
+                self.assertIn("sample/__init__.py", wheel.namelist())
 
     def test_cli_only_reproducible_wheels(self):
         self.assertTrue(self.build())
@@ -329,17 +360,32 @@ class VerifyTest(unittest.TestCase):
             wheels.verify_pypi(NAME, VERSION)
         sleep.assert_not_called()
 
-    def test_verify_outputs_version_without_build_inputs(self):
-        with tempfile.TemporaryDirectory() as temp:
-            package_json = Path(temp, "package.json")
-            package_json.write_text('{"version":"1.2.3"}', encoding="utf-8")
-            result = Path(temp, "outputs")
-            env = {"WHEELS_NAME": NAME, "WHEELS_PACKAGE_JSON": "package.json", "GITHUB_OUTPUT": str(result)}
-            with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", ["script", "verify"]), \
-                 patch.object(Path, "read_bytes", return_value=package_json.read_bytes()), \
-                 patch.object(wheels.urllib.request, "urlopen", return_value=registry([wheel_entry(name) for name in EXPECTED])):
-                self.assertEqual(wheels.main(), 0)
-            self.assertEqual(result.read_text(encoding="utf-8"), "version=1.2.3\n")
+    def test_verify_outputs_version_with_default_or_aliased_distribution(self):
+        for alias, dist, prefix in ((None, "sample", "sample"), ("vendor-sample", "vendor-sample", "vendor_sample")):
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as temp:
+                package_json = Path(temp, "package.json")
+                package_json.write_text('{"version":"1.2.3"}', encoding="utf-8")
+                result = Path(temp, "outputs")
+                env = {"WHEELS_NAME": NAME, "WHEELS_PACKAGE_JSON": "package.json", "GITHUB_OUTPUT": str(result)}
+                if alias is not None:
+                    env["WHEELS_PYPI_NAME"] = alias
+                files = [wheel_entry(name.replace("sample-", prefix + "-", 1)) for name in EXPECTED]
+                with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", ["script", "verify"]), \
+                     patch.object(Path, "read_bytes", return_value=package_json.read_bytes()), \
+                     patch.object(wheels.urllib.request, "urlopen", return_value=registry(files)) as probe:
+                    self.assertEqual(wheels.main(), 0)
+                probe.assert_called_once()
+                self.assertEqual(probe.call_args.args[0].full_url, f"https://pypi.org/pypi/{dist}/json")
+                self.assertEqual(result.read_text(encoding="utf-8"), "version=1.2.3\n")
+
+    def test_invalid_alias_is_rejected_before_registry_or_release_io(self):
+        env = {"WHEELS_NAME": NAME, "WHEELS_PYPI_NAME": "../wrong", "WHEELS_PACKAGE_JSON": PACKAGE_JSON}
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", ["script", "build"]), \
+             patch.object(sys, "stderr", new_callable=io.StringIO) as stderr, \
+             patch.object(wheels.urllib.request, "urlopen") as probe:
+            self.assertEqual(wheels.main(), 1)
+        probe.assert_not_called()
+        self.assertIn("invalid PyPI distribution name", stderr.getvalue())
 
 
 if __name__ == "__main__":

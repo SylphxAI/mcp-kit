@@ -302,8 +302,13 @@ set skips the build. To recover a partial delivery, the action rebuilds the full
 set and the publisher skips existing files. If an expected filename was yanked,
 un-yank it or release a new version; PyPI does not let you reuse that filename.
 
-Set `python-package-dir` to include the Python import package (the normalized
-wheel name), and `extras` to one `extra=requirement` per line. A custom
+If the PyPI distribution name differs from the executable, pass `pypi-name`
+to both build and verify and configure the Trusted Publisher for that PyPI
+project. If omitted, it defaults to `name`. The release archives and executable
+still use `name`.
+
+Set `python-package-dir` to include the Python import package (based on `name`,
+not `pypi-name`), and `extras` to one `extra=requirement` per line. A custom
 `smoke-command` runs from the caller checkout with the installed CLI and
 Python on `PATH` and the selected version in `WHEEL_VERSION`.
 
