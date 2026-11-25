@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.18
+
+- Add optional `node-version-file` for native builds. Use the version file from the canonical source commit and skip Node.js setup on older commits without it.
+
 ## 0.8.17
 
 - Add optional `node-version` and `pre-build` inputs to generate files before compiling missing native binaries. Recovered binaries and callers that omit both inputs skip the new steps.

@@ -282,20 +282,29 @@ test('optional pre-build steps only run before compiling missing natives', () =>
   const build = jobs.split(/\n(?=  [a-z][a-z-]*:\n)/).find((job) => job.startsWith('  build:\n'));
   const steps = build.split('\n      - ');
   const recover = steps.findIndex((step) => step.startsWith('id: recovery\n'));
+  const versionFile = steps.findIndex((step) => step.includes('id: node-version-file'));
   const setup = steps.findIndex((step) => step.includes('uses: actions/setup-node@'));
   const hook = steps.findIndex((step) => step.includes('PRE_BUILD:'));
   const compile = steps.findIndex((step) => step.startsWith('name: Build missing native\n'));
-  assert.ok(recover > 0 && recover < setup && setup < hook && hook < compile);
+  assert.ok(recover > 0 && recover < versionFile && versionFile < setup && setup < hook && hook < compile);
   assert.match(build, /if: needs\.check\.outputs\.publish == 'true'/);
   assert.match(steps[setup], /uses: actions\/setup-node@[a-f0-9]{40}\b/);
-  for (const [input, step] of [['node-version', steps[setup]], ['pre-build', steps[hook]]]) {
+  for (const input of ['node-version', 'node-version-file', 'pre-build']) {
     const declaration = call.split(/\n      (?=\S)/).find((line) => line.startsWith(input + ':\n'));
     assert.match(declaration, /type: string\n\s+default: ''/);
     assert.doesNotMatch(declaration, /required: true/);
-    assert.ok(step.includes("if: inputs." + input + " != '' && steps.recovery.outputs.recovered == 'false'\n"));
-    assert.equal(jobs.split('inputs.' + input).length - 1, 2, 'only the native step reads the input');
+    assert.ok(!jobs.replace(build, '').includes('inputs.' + input), 'only the native job reads the input');
   }
-  assert.match(steps[setup], /node-version: \$\{\{ inputs\.node-version \}\}/);
+  for (const [input, step] of [['node-version-file', steps[versionFile]], ['pre-build', steps[hook]]]) {
+    assert.ok(step.includes("if: inputs." + input + " != '' && steps.recovery.outputs.recovered == 'false'\n"));
+  }
+  assert.ok(steps[versionFile].includes('working-directory: ${{ github.workspace }}'));
+  assert.ok(steps[versionFile].includes('env:\n          NODE_VERSION_FILE: ${{ inputs.node-version-file }}'));
+  assert.ok(steps[versionFile].includes('git cat-file -t "$CANONICAL_SHA:$NODE_VERSION_FILE"'));
+  assert.ok(steps[setup].includes("if: steps.recovery.outputs.recovered == 'false' && ((inputs.node-version-file == '' && inputs.node-version != '') || steps.node-version-file.outputs.present == 'true')\n"));
+  assert.ok(steps[setup].includes("node-version: ${{ inputs.node-version-file == '' && inputs.node-version || '' }}"));
+  assert.ok(steps[setup].includes('node-version-file: ${{ inputs.node-version-file }}'));
+  assert.equal(jobs.split('inputs.pre-build').length - 1, 2, 'only the native hook reads its command');
   assert.ok(steps[hook].includes('working-directory: ${{ github.workspace }}'));
   assert.ok(steps[hook].includes('env:\n          PRE_BUILD: ${{ inputs.pre-build }}'));
   assert.ok(steps[hook].includes('run: bash -eo pipefail -c "$PRE_BUILD"'));
