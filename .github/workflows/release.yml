@@ -64,6 +64,14 @@ on:
       cargo-package:
         type: string
         default: ''
+      node-version:
+        description: 'Optional Node.js version to set up before compiling missing native binaries.'
+        type: string
+        default: ''
+      pre-build:
+        description: 'Optional Bash script to run from the source root before compiling missing native binaries.'
+        type: string
+        default: ''
       package-dir:
         description: 'Directory of the main npm package. Default packages/<name>.'
         type: string
@@ -253,6 +261,18 @@ jobs:
           version: 0.14.1
       - if: matrix.zig && steps.recovery.outputs.recovered != 'true'
         run: cargo install cargo-zigbuild --version 0.23.0 --locked
+      - name: Set up Node.js for the native build
+        if: inputs.node-version != '' && steps.recovery.outputs.recovered == 'false'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Run pre-build script
+        if: inputs.pre-build != '' && steps.recovery.outputs.recovered == 'false'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          PRE_BUILD: ${{ inputs.pre-build }}
+        run: bash -eo pipefail -c "$PRE_BUILD"
       - name: Build missing native
         if: steps.recovery.outputs.recovered != 'true'
         shell: bash
