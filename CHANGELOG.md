@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.17
+
+- Add optional `node-version` and `pre-build` inputs to generate files before compiling missing native binaries. Recovered binaries and callers that omit both inputs skip the new steps.
+
 ## 0.8.16
 
 - Let setup register a persistent executable or a uvx command for PyPI installs, without requiring Node.js. Existing npm registrations and the original Server API keep their defaults.

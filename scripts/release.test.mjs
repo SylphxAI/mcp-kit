@@ -276,6 +276,31 @@ test('workflow keeps required build success and verifies replacement before reti
   assert.doesNotMatch(workflow, /if ! npm view|if gh release view|find "artifacts/);
 });
 
+test('optional pre-build steps only run before compiling missing natives', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const [call, jobs] = workflow.split('\njobs:\n');
+  const build = jobs.split(/\n(?=  [a-z][a-z-]*:\n)/).find((job) => job.startsWith('  build:\n'));
+  const steps = build.split('\n      - ');
+  const recover = steps.findIndex((step) => step.startsWith('id: recovery\n'));
+  const setup = steps.findIndex((step) => step.includes('uses: actions/setup-node@'));
+  const hook = steps.findIndex((step) => step.includes('PRE_BUILD:'));
+  const compile = steps.findIndex((step) => step.startsWith('name: Build missing native\n'));
+  assert.ok(recover > 0 && recover < setup && setup < hook && hook < compile);
+  assert.match(build, /if: needs\.check\.outputs\.publish == 'true'/);
+  assert.match(steps[setup], /uses: actions\/setup-node@[a-f0-9]{40}\b/);
+  for (const [input, step] of [['node-version', steps[setup]], ['pre-build', steps[hook]]]) {
+    const declaration = call.split(/\n      (?=\S)/).find((line) => line.startsWith(input + ':\n'));
+    assert.match(declaration, /type: string\n\s+default: ''/);
+    assert.doesNotMatch(declaration, /required: true/);
+    assert.ok(step.includes("if: inputs." + input + " != '' && steps.recovery.outputs.recovered == 'false'\n"));
+    assert.equal(jobs.split('inputs.' + input).length - 1, 2, 'only the native step reads the input');
+  }
+  assert.match(steps[setup], /node-version: \$\{\{ inputs\.node-version \}\}/);
+  assert.ok(steps[hook].includes('working-directory: ${{ github.workspace }}'));
+  assert.ok(steps[hook].includes('env:\n          PRE_BUILD: ${{ inputs.pre-build }}'));
+  assert.ok(steps[hook].includes('run: bash -eo pipefail -c "$PRE_BUILD"'));
+});
+
 test('workflow clamps native artifact retention to 1 day, cleans up intermediate artifacts and reports OIDC 403 clearly', () => {
   const workflow = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const uploads = [...workflow.matchAll(/uses: actions\/upload-artifact@[^\n]+[\s\S]*?(?=\n      -\s|\n  [a-z][a-z-]*:|$)/g)];

@@ -225,6 +225,24 @@ jobs:
 
 The workflow checks every requested delivery channel: all five native npm packages, the launcher and aliases, the GitHub release assets (including requested bundles), the exact MCP Registry version, and the optional GHCR image. A fresh run finishes missing channels without republishing delivered packages or overwriting existing release assets. HTTP 404 alone means absent; authentication, throttling, server and transport errors stop the run rather than authorizing publication.
 
+### Build assets before compiling
+
+To generate files that your native binary embeds, add these optional inputs to
+the release job's `with` block:
+
+```yaml
+node-version: '24'
+pre-build: |
+  npm ci
+  npm run build
+```
+
+Each input defaults to an empty string and can be used on its own. For each
+missing native binary, `node-version` sets up Node.js and `pre-build` runs a Bash
+script from the checked-out source root before compilation. Use a trusted script
+that works on each selected runner OS. Neither input changes recovery,
+verification, packaging or publishing; omit both to keep the existing build.
+
 ### Homebrew and Scoop
 
 Opt in with one input each; the release then writes `Formula/<name>.rb` (macOS and Linux, arm64 and x86_64) to the tap and `bucket/<name>.json` (Windows x64, with `checkver` and `autoupdate`) to the bucket, from the digests of the release archives. It runs after the release, and again on a no-op run, so a missed update heals. Unchanged files are not committed. Changed files use a stable release branch and pull request, then the destination’s required checks and merge queue. The action waits up to 15 minutes per destination and verifies the exact merged file bytes; a closed PR, changed head, deadline or readback mismatch fails publication. Reruns resume an open PR without duplicating it.
