@@ -68,6 +68,10 @@ on:
         description: 'Optional Node.js version to set up before compiling missing native binaries.'
         type: string
         default: ''
+      node-version-file:
+        description: 'Optional Node.js version file relative to the source root. Overrides node-version; skip Node.js setup if the file is absent from the canonical source.'
+        type: string
+        default: ''
       pre-build:
         description: 'Optional Bash script to run from the source root before compiling missing native binaries.'
         type: string
@@ -261,11 +265,24 @@ jobs:
           version: 0.14.1
       - if: matrix.zig && steps.recovery.outputs.recovered != 'true'
         run: cargo install cargo-zigbuild --version 0.23.0 --locked
+      - name: Check for the Node.js version file
+        id: node-version-file
+        if: inputs.node-version-file != '' && steps.recovery.outputs.recovered == 'false'
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        env:
+          NODE_VERSION_FILE: ${{ inputs.node-version-file }}
+        run: |
+          if [[ -f "$NODE_VERSION_FILE" && ! -L "$NODE_VERSION_FILE" &&
+                "$(git cat-file -t "$CANONICAL_SHA:$NODE_VERSION_FILE" 2>/dev/null)" == blob ]]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          fi
       - name: Set up Node.js for the native build
-        if: inputs.node-version != '' && steps.recovery.outputs.recovered == 'false'
+        if: steps.recovery.outputs.recovered == 'false' && ((inputs.node-version-file == '' && inputs.node-version != '') || steps.node-version-file.outputs.present == 'true')
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ inputs.node-version-file == '' && inputs.node-version || '' }}
+          node-version-file: ${{ inputs.node-version-file }}
       - name: Run pre-build script
         if: inputs.pre-build != '' && steps.recovery.outputs.recovered == 'false'
         working-directory: ${{ github.workspace }}

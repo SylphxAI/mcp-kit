@@ -241,7 +241,13 @@ Each input defaults to an empty string and can be used on its own. For each
 missing native binary, `node-version` sets up Node.js and `pre-build` runs a Bash
 script from the checked-out source root before compilation. Use a trusted script
 that works on each selected runner OS. Neither input changes recovery,
-verification, packaging or publishing; omit both to keep the existing build.
+verification, packaging or publishing; omit the optional inputs to keep the existing build.
+
+To read the Node.js version from the source commit, use `node-version-file`
+(for example, `.node-version`). It defaults to an empty string. If set, it takes
+precedence over `node-version` and must name a tracked file relative to the
+source root. A historical commit without the file skips Node.js setup;
+`pre-build` still runs if set and a native binary is missing.
 
 ### Homebrew and Scoop
 
