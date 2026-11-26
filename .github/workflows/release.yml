@@ -396,19 +396,28 @@ jobs:
             fi
             echo "+ $name@$V"
           }
-          for d in "$NATIVES"/*/; do pub "${d%/}"; done
+          # shellcheck source=/dev/null
+          . .mcp-kit/scripts/npm-settle.sh
+          natives=("$NATIVES"/*/)
+          for d in "${natives[@]}"; do pub "${d%/}"; done
+          # The launcher can become latest as soon as it is published. Wait
+          # for all its native dependencies to resolve first.
+          settle_packages "$V" "${natives[@]}"
           pub "$DIR"
+          settle_packages "$V" "$DIR"
           for a in $ALIASES; do pub "$a"; done
-      - name: Wait for every published package
+      - name: Verify npm package readiness
+        env:
+          NPM_MISSING: ${{ needs.check.outputs.npm-missing }}
         run: |
           set -euo pipefail
-          # npm publish returns before the registry serves the version (ETARGET/404
-          # for seconds to minutes). Wait per package: natives, main, aliases.
           # shellcheck source=/dev/null
           . .mcp-kit/scripts/npm-settle.sh
           dirs=()
-          for d in "$NATIVES"/*/; do dirs+=("${d%/}"); done
-          dirs+=("$DIR")
+          # If npm publishing was skipped, check natives and main here.
+          if [ "$NPM_MISSING" != true ]; then
+            dirs+=("$NATIVES"/*/ "$DIR")
+          fi
           for a in $ALIASES; do dirs+=("$a"); done
           settle_packages "$V" "${dirs[@]}"
           # npm view reads the full packument; npx reads the abbreviated one, so a
